@@ -12,22 +12,29 @@ pub fn create_diff_proposal(
     relative_path: String,
     proposed_content: String,
 ) -> Result<DiffProposal, String> {
-    let database = state
-        .database
-        .lock()
-        .map_err(|_| "database lock failed".to_string())?;
-    let session = database
-        .find_session(&session_id)
-        .map_err(|error| error.to_string())?;
-    let project_root = session
-        .project_root
-        .ok_or_else(|| "select a project folder before creating file changes".to_string())?;
-    let original_content = projects::read_project_file(project_root, relative_path.clone())
-        .map(|file| file.content)
-        .unwrap_or_default();
+    let project_root = {
+        let database = state
+            .database
+            .lock()
+            .map_err(|_| "database lock failed".to_string())?;
+        let session = database
+            .find_session(&session_id)
+            .map_err(|error| error.to_string())?;
+        session
+            .project_root
+            .ok_or_else(|| "select a project folder before creating file changes".to_string())?
+    };
+    let original_content = match projects::read_project_file(project_root, relative_path.clone()) {
+        Ok(file) => file.content,
+        Err(error) if projects::is_not_found_error(&error) => String::new(),
+        Err(error) => return Err(error.to_string()),
+    };
     let diff_text = diffs::create_unified_diff(&original_content, &proposed_content);
 
-    database
+    state
+        .database
+        .lock()
+        .map_err(|_| "database lock failed".to_string())?
         .create_diff_proposal(
             session_id,
             relative_path,
@@ -56,19 +63,22 @@ pub fn approve_diff_proposal(
     state: State<'_, AppState>,
     proposal_id: String,
 ) -> Result<(), String> {
-    let database = state
-        .database
-        .lock()
-        .map_err(|_| "database lock failed".to_string())?;
-    let proposal = database
-        .find_diff_proposal(&proposal_id)
-        .map_err(|error| error.to_string())?;
-    let session = database
-        .find_session(&proposal.session_id)
-        .map_err(|error| error.to_string())?;
-    let project_root = session
-        .project_root
-        .ok_or_else(|| "session has no selected project folder".to_string())?;
+    let (proposal, project_root) = {
+        let database = state
+            .database
+            .lock()
+            .map_err(|_| "database lock failed".to_string())?;
+        let proposal = database
+            .find_diff_proposal(&proposal_id)
+            .map_err(|error| error.to_string())?;
+        let session = database
+            .find_session(&proposal.session_id)
+            .map_err(|error| error.to_string())?;
+        let project_root = session
+            .project_root
+            .ok_or_else(|| "session has no selected project folder".to_string())?;
+        (proposal, project_root)
+    };
 
     projects::write_file_atomically(
         project_root,
@@ -76,7 +86,10 @@ pub fn approve_diff_proposal(
         proposal.proposed_content,
     )
     .map_err(|error| error.to_string())?;
-    database
+    state
+        .database
+        .lock()
+        .map_err(|_| "database lock failed".to_string())?
         .update_diff_status(proposal_id, DiffStatus::Approved)
         .map_err(|error| error.to_string())
 }

@@ -12,7 +12,12 @@ import type {
   ProviderInstallStatus,
 } from "../../domain/models/providerInstall";
 import type { ChatMessage, Session } from "../../domain/models/session";
-import type { ShellCommandOutput, ShellKind } from "../../domain/models/shell";
+import type {
+  ResolvedShellDirectory,
+  ShellCommandRun,
+  ShellCommandOutput,
+  ShellKind,
+} from "../../domain/models/shell";
 
 export const tauriCodemindRepository: CodemindRepository = {
   listSessions: () => invoke<Session[]>("list_sessions"),
@@ -76,6 +81,19 @@ export const tauriCodemindRepository: CodemindRepository = {
       currentDirectory,
       command,
       shellKind,
+    }),
+  startShellCommand: (currentDirectory, command, shellKind: ShellKind, runId) =>
+    invoke<ShellCommandRun>("start_shell_command", {
+      currentDirectory,
+      command,
+      shellKind,
+      runId,
+    }),
+  stopShellCommand: (runId) => invoke<void>("stop_shell_command", { runId }),
+  resolveShellDirectory: (currentDirectory, requestedDirectory) =>
+    invoke<ResolvedShellDirectory>("resolve_shell_directory", {
+      currentDirectory,
+      requestedDirectory,
     }),
   runProviderLogin: (agentId) => invoke<void>("run_provider_login", { agentId }),
   getProviderInstallStatus: (agentId) =>

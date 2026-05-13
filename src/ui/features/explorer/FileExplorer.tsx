@@ -14,22 +14,24 @@ import { cn } from "../../lib/classNames";
 interface FileExplorerProps {
   projectRoot: string | null;
   fileChangeSummaryByPath: Record<string, FileChangeSummary>;
+  onSelectFile: (relativePath: string) => void;
 }
 
 export function FileExplorer({
   projectRoot,
   fileChangeSummaryByPath,
+  onSelectFile,
 }: FileExplorerProps) {
   const [filterText, setFilterText] = useState("");
   const projectTree = useProjectTree(projectRoot);
   const selectedFilePath = useWorkspaceStore((store) => store.selectedFilePath);
-  const setSelectedFilePath = useWorkspaceStore((store) => store.setSelectedFilePath);
   const projectSearch = useProjectSearch(projectRoot, filterText);
   const visibleNodes = useMemo(
     () => filterTree(projectTree.data, filterText),
     [projectTree.data, filterText],
   );
-  const isSearching = filterText.trim().length > 0;
+  const normalizedFilterText = filterText.trim();
+  const isSearching = normalizedFilterText.length >= 2;
 
   return (
     <Panel className="flex h-full min-w-0 flex-col bg-[#121212]">
@@ -47,9 +49,12 @@ export function FileExplorer({
           <p className="p-3 text-sm text-zinc-500">Select a project folder to browse files.</p>
         ) : null}
         {projectTree.isLoading ? <p className="p-3 text-sm text-zinc-500">Loading tree...</p> : null}
+        {normalizedFilterText.length === 1 ? (
+          <p className="p-3 text-sm text-zinc-500">Type at least two characters to search.</p>
+        ) : null}
         {isSearching ? (
           <div className="space-y-1">
-            {projectSearch.isLoading ? (
+            {projectSearch.isFetching && !projectSearch.data ? (
               <p className="p-3 text-sm text-zinc-500">Searching...</p>
             ) : null}
             {projectSearch.data?.map((searchResult) => (
@@ -57,7 +62,7 @@ export function FileExplorer({
                 key={searchResult.relativePath}
                 searchResult={searchResult}
                 changeSummary={fileChangeSummaryByPath[searchResult.relativePath]}
-                onSelectFile={setSelectedFilePath}
+                onSelectFile={onSelectFile}
               />
             ))}
           </div>
@@ -68,7 +73,7 @@ export function FileExplorer({
             projectRoot={projectRoot}
             selectedFilePath={selectedFilePath}
             fileChangeSummaryByPath={fileChangeSummaryByPath}
-            onSelectFile={setSelectedFilePath}
+            onSelectFile={onSelectFile}
           />
         ) : null}
       </div>

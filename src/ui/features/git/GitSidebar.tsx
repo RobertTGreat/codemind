@@ -11,7 +11,7 @@ import {
   Upload,
 } from "lucide-react";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   GitChangedFile,
   GitOperationResult,
@@ -60,7 +60,9 @@ export function GitSidebar({ projectRoot, width, onResize }: GitSidebarProps) {
   const [remoteUrlInput, setRemoteUrlInput] = useState("");
   const [commitMessage, setCommitMessage] = useState("");
   const [operationStatus, setOperationStatus] = useState<OperationStatus | null>(null);
+  const [previewWidth, setPreviewWidth] = useState<number | null>(null);
   const repositoryStatus = gitStatus.data;
+  const displayedWidth = previewWidth ?? width;
 
   useEffect(() => {
     setRemoteUrlInput(repositoryStatus?.remoteUrl ?? "");
@@ -147,7 +149,7 @@ export function GitSidebar({ projectRoot, width, onResize }: GitSidebarProps) {
   return (
     <aside
       className="relative flex h-full shrink-0 flex-col overflow-hidden border-r border-zinc-800 bg-[#181818]"
-      style={{ width }}
+      style={{ width: displayedWidth }}
     >
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-zinc-800 px-3">
         <GitBranch size={15} className="text-emerald-300" />
@@ -413,7 +415,11 @@ export function GitSidebar({ projectRoot, width, onResize }: GitSidebarProps) {
         ) : null}
       </div>
 
-      <SidebarResizeHandle initialWidth={width} onResize={onResize} />
+      <SidebarResizeHandle
+        initialWidth={width}
+        onPreview={setPreviewWidth}
+        onResize={onResize}
+      />
     </aside>
   );
 }
@@ -721,18 +727,36 @@ function IconAction({
 
 function SidebarResizeHandle({
   initialWidth,
+  onPreview,
   onResize,
 }: {
   initialWidth: number;
+  onPreview: (width: number | null) => void;
   onResize: (width: number) => void;
 }) {
+  const animationFrameRef = useRef<number | null>(null);
+
   function handlePointerDown(event: ReactPointerEvent<HTMLDivElement>) {
     const startX = event.clientX;
     const startWidth = initialWidth;
+    event.currentTarget.setPointerCapture(event.pointerId);
+
     const handlePointerMove = (moveEvent: PointerEvent) => {
-      onResize(startWidth + moveEvent.clientX - startX);
+      const nextWidth = startWidth + moveEvent.clientX - startX;
+      if (animationFrameRef.current !== null) {
+        window.cancelAnimationFrame(animationFrameRef.current);
+      }
+      animationFrameRef.current = window.requestAnimationFrame(() => {
+        onPreview(nextWidth);
+      });
     };
-    const handlePointerUp = () => {
+    const handlePointerUp = (upEvent: PointerEvent) => {
+      if (animationFrameRef.current !== null) {
+        window.cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = null;
+      }
+      onPreview(null);
+      onResize(startWidth + upEvent.clientX - startX);
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
     };
@@ -743,6 +767,8 @@ function SidebarResizeHandle({
 
   return (
     <div
+      role="separator"
+      aria-orientation="vertical"
       className="absolute right-[-3px] top-0 z-40 h-full w-1.5 cursor-col-resize bg-transparent hover:bg-zinc-500"
       onPointerDown={handlePointerDown}
     />

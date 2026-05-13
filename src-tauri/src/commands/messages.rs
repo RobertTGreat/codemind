@@ -19,6 +19,7 @@ pub fn list_messages(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn send_message(
     app_handle: AppHandle,
     state: State<'_, AppState>,

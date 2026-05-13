@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::{
     collections::HashMap,
     fs,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read},
     process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -53,6 +53,7 @@ impl AgentCancellationToken {
 
 static ACTIVE_AGENT_RUNS: OnceLock<Mutex<HashMap<String, ActiveAgentRun>>> = OnceLock::new();
 
+#[allow(clippy::too_many_arguments)]
 pub fn stream_agent_response(
     app_handle: AppHandle,
     session_id: String,
@@ -237,18 +238,27 @@ fn kill_process_tree(process_id: u32) -> Result<(), String> {
 
 #[cfg(not(target_os = "windows"))]
 fn kill_process_tree(process_id: u32) -> Result<(), String> {
-    let status = Command::new("kill")
-        .args(["-TERM", &process_id.to_string()])
+    let process_group_id = format!("-{process_id}");
+    let terminate_status = Command::new("kill")
+        .args(["-TERM", "--", &process_group_id])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .map_err(|error| error.to_string())?;
 
-    status
-        .success()
-        .then_some(())
-        .ok_or_else(|| format!("failed to stop process {process_id}"))
+    if terminate_status.success() {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let _ = Command::new("kill")
+            .args(["-KILL", "--", &process_group_id])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        return Ok(());
+    }
+
+    Err(format!("failed to stop process group for pid {process_id}"))
 }
 
 fn emit_agent_activity(
@@ -324,6 +334,7 @@ fn emit_agent_complete(stream_context: AgentStreamContext) {
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_codex_cli_response(
     stream_context: &AgentStreamContext,
     prompt: &str,
@@ -386,11 +397,7 @@ fn create_codex_cli_response(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        codex_command.creation_flags(CREATE_NO_WINDOW);
-    }
+    configure_long_running_child_process(&mut codex_command);
 
     emit_agent_activity(stream_context, "Launching Codex CLI", "status");
     let mut child = codex_command.spawn().map_err(|error| error.to_string())?;
@@ -404,6 +411,16 @@ fn create_codex_cli_response(
         .stdout
         .take()
         .ok_or_else(|| "Codex CLI stdout stream was unavailable".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Codex CLI stderr stream was unavailable".to_string())?;
+    let stderr_reader = std::thread::spawn(move || {
+        let mut stderr_text = String::new();
+        let mut reader = BufReader::new(stderr);
+        let _ = reader.read_to_string(&mut stderr_text);
+        stderr_text
+    });
 
     let mut streamed_response = String::new();
     let mut reader = BufReader::new(stdout);
@@ -427,10 +444,12 @@ fn create_codex_cli_response(
         }
     }
 
-    let output = child
-        .wait_with_output()
-        .map_err(|error| error.to_string())?;
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let exit_status = child.wait().map_err(|error| error.to_string())?;
+    let stderr = stderr_reader
+        .join()
+        .unwrap_or_else(|_| "failed to read Codex CLI stderr".to_string())
+        .trim()
+        .to_string();
     let final_response = fs::read_to_string(&final_message_path)
         .unwrap_or_else(|_| streamed_response.clone())
         .trim()
@@ -441,7 +460,7 @@ fn create_codex_cli_response(
         return Ok(STOPPED_RESPONSE_TEXT.to_string());
     }
 
-    if !output.status.success() {
+    if !exit_status.success() {
         return Err(if stderr.is_empty() {
             final_response
         } else {
@@ -456,6 +475,28 @@ fn create_codex_cli_response(
             stream_text_response(stream_context, &final_response);
         }
         Ok(final_response)
+    }
+}
+
+fn configure_long_running_child_process(command: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    #[cfg(all(unix, not(target_os = "windows")))]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            });
+        }
     }
 }
 

@@ -485,6 +485,7 @@ dependencies = [
  "chrono",
  "dirs-next",
  "ignore",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",
@@ -496,6 +497,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-shell",
  "tauri-plugin-store",
+ "url",
  "uuid",
  "walkdir",
 ]

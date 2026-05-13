@@ -1,17 +1,25 @@
 use crate::services::cli;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
+    io::Read,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
+    sync::{Mutex, OnceLock},
 };
+use tauri::{AppHandle, Emitter};
+use url::Url;
 use uuid::Uuid;
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+const MAX_VSIX_DOWNLOAD_BYTES: u64 = 100 * 1024 * 1024;
+const SHELL_OUTPUT_EVENT_NAME: &str = "shell-output";
 
-#[derive(Debug, Deserialize)]
+static ACTIVE_SHELL_RUNS: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
+
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ShellKind {
     CommandPrompt,
@@ -26,6 +34,31 @@ pub struct ShellCommandOutput {
     pub exit_code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellCommandRun {
+    pub run_id: String,
+    pub command: String,
+    pub cwd: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellOutputEvent {
+    pub run_id: String,
+    pub stream: String,
+    pub chunk: String,
+    pub exit_code: Option<i32>,
+    pub cwd: String,
+    pub is_complete: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedShellDirectory {
+    pub cwd: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -141,6 +174,151 @@ pub fn run_shell_command(
 }
 
 #[tauri::command]
+pub fn start_shell_command(
+    app_handle: AppHandle,
+    current_directory: Option<String>,
+    command: String,
+    shell_kind: ShellKind,
+    run_id: String,
+) -> Result<ShellCommandRun, String> {
+    let trimmed_command = command.trim();
+    if trimmed_command.is_empty() {
+        return Err("command cannot be empty".to_string());
+    }
+    if run_id.trim().is_empty() {
+        return Err("run id cannot be empty".to_string());
+    }
+
+    let working_directory = resolve_working_directory(current_directory)?;
+    let working_directory_text = working_directory.to_string_lossy().to_string();
+    let command_text = trimmed_command.to_string();
+    let thread_run_id = run_id.clone();
+    let thread_command_text = command_text.clone();
+    let thread_working_directory = working_directory.clone();
+
+    std::thread::spawn(move || {
+        let mut shell_command =
+            create_shell_command(&shell_kind, &thread_command_text, &thread_working_directory);
+        shell_command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        configure_streaming_shell_process(&mut shell_command);
+
+        let spawn_result = shell_command.spawn();
+        let mut child = match spawn_result {
+            Ok(child) => child,
+            Err(error) => {
+                emit_shell_output(
+                    &app_handle,
+                    ShellOutputEvent {
+                        run_id: thread_run_id,
+                        stream: "stderr".to_string(),
+                        chunk: error.to_string(),
+                        exit_code: Some(1),
+                        cwd: thread_working_directory.to_string_lossy().to_string(),
+                        is_complete: true,
+                    },
+                );
+                return;
+            }
+        };
+
+        register_shell_run(&thread_run_id, child.id());
+
+        let stdout_handle = child.stdout.take().map(|stdout| {
+            let output_app_handle = app_handle.clone();
+            let output_run_id = thread_run_id.clone();
+            let output_cwd = thread_working_directory.to_string_lossy().to_string();
+            std::thread::spawn(move || {
+                stream_shell_output(output_app_handle, output_run_id, output_cwd, "stdout", stdout);
+            })
+        });
+
+        let stderr_handle = child.stderr.take().map(|stderr| {
+            let output_app_handle = app_handle.clone();
+            let output_run_id = thread_run_id.clone();
+            let output_cwd = thread_working_directory.to_string_lossy().to_string();
+            std::thread::spawn(move || {
+                stream_shell_output(output_app_handle, output_run_id, output_cwd, "stderr", stderr);
+            })
+        });
+
+        let exit_code = child.wait().ok().and_then(|status| status.code());
+        if let Some(handle) = stdout_handle {
+            let _ = handle.join();
+        }
+        if let Some(handle) = stderr_handle {
+            let _ = handle.join();
+        }
+        unregister_shell_run(&thread_run_id);
+
+        emit_shell_output(
+            &app_handle,
+            ShellOutputEvent {
+                run_id: thread_run_id,
+                stream: "status".to_string(),
+                chunk: String::new(),
+                exit_code,
+                cwd: thread_working_directory.to_string_lossy().to_string(),
+                is_complete: true,
+            },
+        );
+    });
+
+    Ok(ShellCommandRun {
+        run_id,
+        command: command_text,
+        cwd: working_directory_text,
+    })
+}
+
+#[tauri::command]
+pub fn stop_shell_command(run_id: String) -> Result<(), String> {
+    let process_id = unregister_shell_run(&run_id)
+        .ok_or_else(|| "shell command is no longer running".to_string())?;
+    kill_shell_process_tree(process_id)
+}
+
+#[tauri::command]
+pub fn resolve_shell_directory(
+    current_directory: Option<String>,
+    requested_directory: String,
+) -> Result<ResolvedShellDirectory, String> {
+    let base_directory = resolve_working_directory(current_directory)?;
+    let requested_directory = unquote_shell_path(requested_directory.trim());
+    let requested_directory = expand_home_directory(&requested_directory);
+    let candidate_directory = if requested_directory.is_empty() || requested_directory == "." {
+        base_directory
+    } else {
+        let requested_path = PathBuf::from(&requested_directory);
+        if requested_path.is_absolute() {
+            requested_path
+        } else {
+            base_directory.join(requested_path)
+        }
+    };
+    let canonical_directory =
+        fs::canonicalize(candidate_directory).map_err(|error| error.to_string())?;
+    if !canonical_directory.is_dir() {
+        return Err("target path is not a directory".to_string());
+    }
+
+    Ok(ResolvedShellDirectory {
+        cwd: canonical_directory.to_string_lossy().to_string(),
+    })
+}
+
+fn resolve_working_directory(current_directory: Option<String>) -> Result<PathBuf, String> {
+    match current_directory {
+        Some(directory) if !directory.trim().is_empty() => {
+            fs::canonicalize(directory).map_err(|error| error.to_string())
+        }
+        _ => std::env::current_dir().map_err(|error| error.to_string()),
+    }
+}
+
+#[tauri::command]
 pub fn run_provider_login(agent_id: String) -> Result<(), String> {
     if agent_id != "codex-cli" {
         return Err("login is currently available for Codex CLI only".to_string());
@@ -220,9 +398,7 @@ pub fn install_open_vsx_extension(
         return Err("extension id cannot be empty".to_string());
     }
 
-    if !download_url.starts_with("https://open-vsx.org/") {
-        return Err("only Open VSX downloads are supported".to_string());
-    }
+    validate_open_vsx_download_url(&download_url)?;
 
     let vsix_path = std::env::temp_dir().join(format!(
         "codemind-openvsx-{}-{}.vsix",
@@ -307,6 +483,127 @@ fn create_shell_command(
     }
 }
 
+fn configure_streaming_shell_process(command: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = command;
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+}
+
+fn stream_shell_output<R: Read>(
+    app_handle: AppHandle,
+    run_id: String,
+    cwd: String,
+    stream: &'static str,
+    mut output_reader: R,
+) {
+    let mut output_buffer = [0_u8; 8192];
+    loop {
+        match output_reader.read(&mut output_buffer) {
+            Ok(0) => break,
+            Ok(byte_count) => emit_shell_output(
+                &app_handle,
+                ShellOutputEvent {
+                    run_id: run_id.clone(),
+                    stream: stream.to_string(),
+                    chunk: String::from_utf8_lossy(&output_buffer[..byte_count]).to_string(),
+                    exit_code: None,
+                    cwd: cwd.clone(),
+                    is_complete: false,
+                },
+            ),
+            Err(error) => {
+                emit_shell_output(
+                    &app_handle,
+                    ShellOutputEvent {
+                        run_id: run_id.clone(),
+                        stream: "stderr".to_string(),
+                        chunk: error.to_string(),
+                        exit_code: None,
+                        cwd: cwd.clone(),
+                        is_complete: false,
+                    },
+                );
+                break;
+            }
+        }
+    }
+}
+
+fn emit_shell_output(app_handle: &AppHandle, event: ShellOutputEvent) {
+    let _ = app_handle.emit(SHELL_OUTPUT_EVENT_NAME, event);
+}
+
+fn register_shell_run(run_id: &str, process_id: u32) {
+    if let Ok(mut active_shell_runs) = active_shell_runs().lock() {
+        active_shell_runs.insert(run_id.to_string(), process_id);
+    }
+}
+
+fn unregister_shell_run(run_id: &str) -> Option<u32> {
+    active_shell_runs()
+        .lock()
+        .ok()
+        .and_then(|mut active_shell_runs| active_shell_runs.remove(run_id))
+}
+
+fn active_shell_runs() -> &'static Mutex<HashMap<String, u32>> {
+    ACTIVE_SHELL_RUNS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(target_os = "windows")]
+fn kill_shell_process_tree(process_id: u32) -> Result<(), String> {
+    let status = Command::new("taskkill")
+        .args(["/PID", &process_id.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|error| error.to_string())?;
+
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| format!("failed to stop process {process_id}"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn kill_shell_process_tree(process_id: u32) -> Result<(), String> {
+    let process_group_id = format!("-{process_id}");
+    let terminate_status = Command::new("kill")
+        .args(["-TERM", "--", &process_group_id])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|error| error.to_string())?;
+
+    if terminate_status.success() {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let _ = Command::new("kill")
+            .args(["-KILL", "--", &process_group_id])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        return Ok(());
+    }
+
+    Err(format!("failed to stop process group for pid {process_id}"))
+}
+
 fn download_file(download_url: &str, output_path: &Path) -> Result<(), String> {
     let mut download_command = if cfg!(target_os = "windows") {
         let download_script = format!(
@@ -324,7 +621,14 @@ fn download_file(download_url: &str, output_path: &Path) -> Result<(), String> {
         command
     } else {
         let mut command = Command::new("curl");
-        command.args(["-L", download_url, "-o", &output_path.to_string_lossy()]);
+        command.args([
+            "-L",
+            "--max-filesize",
+            &MAX_VSIX_DOWNLOAD_BYTES.to_string(),
+            download_url,
+            "-o",
+            &output_path.to_string_lossy(),
+        ]);
         command
     };
 
@@ -333,6 +637,13 @@ fn download_file(download_url: &str, output_path: &Path) -> Result<(), String> {
         .map_err(|error| format!("failed to start VSIX download: {error}"))?;
 
     if output.status.success() {
+        let downloaded_file_size = fs::metadata(output_path)
+            .map_err(|error| format!("failed to inspect downloaded VSIX: {error}"))?
+            .len();
+        if downloaded_file_size > MAX_VSIX_DOWNLOAD_BYTES {
+            let _ = fs::remove_file(output_path);
+            return Err("downloaded VSIX is too large".to_string());
+        }
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -341,6 +652,62 @@ fn download_file(download_url: &str, output_path: &Path) -> Result<(), String> {
         } else {
             stderr
         })
+    }
+}
+
+fn validate_open_vsx_download_url(download_url: &str) -> Result<(), String> {
+    let parsed_url =
+        Url::parse(download_url).map_err(|_| "Open VSX download URL is invalid".to_string())?;
+    if parsed_url.scheme() != "https" || parsed_url.host_str() != Some("open-vsx.org") {
+        return Err("only HTTPS downloads from open-vsx.org are supported".to_string());
+    }
+    if !parsed_url.username().is_empty() || parsed_url.password().is_some() {
+        return Err("Open VSX download URL cannot include credentials".to_string());
+    }
+    Ok(())
+}
+
+fn unquote_shell_path(value: &str) -> String {
+    let trimmed_value = value.trim();
+    if trimmed_value.len() >= 2 {
+        let first_character = trimmed_value.chars().next();
+        let last_character = trimmed_value.chars().last();
+        if matches!(
+            (first_character, last_character),
+            (Some('\''), Some('\'')) | (Some('"'), Some('"'))
+        ) {
+            return trimmed_value[1..trimmed_value.len() - 1].to_string();
+        }
+    }
+    trimmed_value.to_string()
+}
+
+fn expand_home_directory(requested_directory: &str) -> String {
+    if requested_directory != "~"
+        && !requested_directory.starts_with("~/")
+        && !requested_directory.starts_with("~\\")
+    {
+        return requested_directory.to_string();
+    }
+
+    let Some(home_directory) = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+    else {
+        return requested_directory.to_string();
+    };
+
+    if requested_directory == "~" {
+        home_directory.to_string_lossy().to_string()
+    } else {
+        home_directory
+            .join(
+                requested_directory
+                    .trim_start_matches("~/")
+                    .trim_start_matches("~\\"),
+            )
+            .to_string_lossy()
+            .to_string()
     }
 }
 
@@ -583,5 +950,22 @@ mod tests {
         let safe_file_name = sanitize_file_name("tauri-apps/tauri:vscode");
 
         assert_eq!(safe_file_name, "tauri-apps-tauri-vscode");
+    }
+
+    #[test]
+    fn validate_open_vsx_download_url_rejects_lookalike_hosts() {
+        assert!(validate_open_vsx_download_url("https://open-vsx.org/api/item.vsix").is_ok());
+        assert!(
+            validate_open_vsx_download_url("https://open-vsx.org.evil.test/api/item.vsix")
+                .is_err()
+        );
+        assert!(validate_open_vsx_download_url("http://open-vsx.org/api/item.vsix").is_err());
+    }
+
+    #[test]
+    fn unquote_shell_path_removes_matching_outer_quotes() {
+        assert_eq!(unquote_shell_path("\"C:\\Projects\\Codemind\""), "C:\\Projects\\Codemind");
+        assert_eq!(unquote_shell_path("'folder name'"), "folder name");
+        assert_eq!(unquote_shell_path("\"missing"), "\"missing");
     }
 }

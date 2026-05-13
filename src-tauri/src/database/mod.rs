@@ -17,6 +17,16 @@ impl Database {
         fs::create_dir_all(&data_directory)?;
         let database_path = data_directory.join("codemind.sqlite");
         let connection = Connection::open(database_path)?;
+        connection.pragma_update(None, "foreign_keys", "ON")?;
+        let database = Self { connection };
+        database.migrate()?;
+        Ok(database)
+    }
+
+    #[cfg(test)]
+    fn open_in_memory() -> Result<Self> {
+        let connection = Connection::open_in_memory()?;
+        connection.pragma_update(None, "foreign_keys", "ON")?;
         let database = Self { connection };
         database.migrate()?;
         Ok(database)
@@ -55,6 +65,13 @@ impl Database {
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
+
+            CREATE INDEX IF NOT EXISTS idx_sessions_updated_at
+                ON sessions(updated_at);
+            CREATE INDEX IF NOT EXISTS idx_messages_session_created
+                ON messages(session_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_diff_proposals_session_status_created
+                ON diff_proposals(session_id, status, created_at);
             ",
         )?;
         Ok(())
@@ -359,4 +376,49 @@ fn map_diff_proposal(row: &rusqlite::Row<'_>) -> rusqlite::Result<DiffProposal> 
         status: DiffStatus::from_database_value(&status),
         created_at: row.get(7)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deleting_session_cascades_messages_and_diff_proposals() {
+        let database = Database::open_in_memory().expect("database opens");
+        let session = database
+            .create_session("Cascade test".to_string(), "codex-cli".to_string())
+            .expect("session is created");
+        database
+            .create_message(
+                session.id.clone(),
+                MessageRole::User,
+                "hello".to_string(),
+            )
+            .expect("message is created");
+        database
+            .create_diff_proposal(
+                session.id.clone(),
+                "README.md".to_string(),
+                "old".to_string(),
+                "new".to_string(),
+                "diff".to_string(),
+            )
+            .expect("diff proposal is created");
+
+        database
+            .delete_session(session.id.clone())
+            .expect("session is deleted");
+
+        let message_count: i64 = database
+            .connection
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .expect("message count can be read");
+        let diff_count: i64 = database
+            .connection
+            .query_row("SELECT COUNT(*) FROM diff_proposals", [], |row| row.get(0))
+            .expect("diff count can be read");
+
+        assert_eq!(message_count, 0);
+        assert_eq!(diff_count, 0);
+    }
 }

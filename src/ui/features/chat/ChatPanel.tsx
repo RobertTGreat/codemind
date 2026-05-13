@@ -132,6 +132,8 @@ export function ChatPanel({ session, onSelectDiff, selectedDiffId }: ChatPanelPr
   const projectRulesByRoot = useWorkspaceStore((store) => store.projectRulesByRoot);
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const shouldStickToLatestMessageRef = useRef(true);
+  const pendingTokenBufferRef = useRef<Record<string, Record<string, string>>>({});
+  const tokenFlushFrameRef = useRef<number | null>(null);
   const currentSessionId = session?.id ?? null;
   const messages = useMessages(currentSessionId);
   const sendMessage = useSendMessage(currentSessionId);
@@ -210,6 +212,7 @@ export function ChatPanel({ session, onSelectDiff, selectedDiffId }: ChatPanelPr
               : currentActiveAssistantMessageId,
           );
           setIsStoppingResponse(false);
+          flushPendingMessageTokens();
         } else {
           setActiveAssistantMessageId(event.payload.messageId);
         }
@@ -269,25 +272,22 @@ export function ChatPanel({ session, onSelectDiff, selectedDiffId }: ChatPanelPr
         }
       }
 
-      queryClient.setQueryData<ChatMessage[]>(
-        codemindQueryKeys.messages(event.payload.sessionId),
-        (currentMessages = []) =>
-          currentMessages.map((message) =>
-            message.id === event.payload.messageId
-              ? {
-                  ...message,
-                  content:
-                    event.payload.token.length === 0
-                      ? message.content
-                      : `${message.content}${event.payload.token}`,
-                }
-              : message,
-          ),
-      );
+      if (event.payload.token.length > 0) {
+        queueMessageToken(
+          event.payload.sessionId,
+          event.payload.messageId,
+          event.payload.token,
+        );
+      }
     });
 
     return () => {
       void unlistenPromise.then((unlisten) => unlisten());
+      if (tokenFlushFrameRef.current !== null) {
+        window.cancelAnimationFrame(tokenFlushFrameRef.current);
+        tokenFlushFrameRef.current = null;
+      }
+      flushPendingMessageTokens();
     };
   }, [currentSessionId, queryClient]);
 
@@ -479,6 +479,38 @@ export function ChatPanel({ session, onSelectDiff, selectedDiffId }: ChatPanelPr
     }, toastDisplayTimeInMilliseconds);
   }
 
+  function queueMessageToken(sessionId: string, messageId: string, token: string) {
+    pendingTokenBufferRef.current[sessionId] = {
+      ...pendingTokenBufferRef.current[sessionId],
+      [messageId]: `${pendingTokenBufferRef.current[sessionId]?.[messageId] ?? ""}${token}`,
+    };
+
+    if (tokenFlushFrameRef.current !== null) {
+      return;
+    }
+
+    tokenFlushFrameRef.current = window.requestAnimationFrame(flushPendingMessageTokens);
+  }
+
+  function flushPendingMessageTokens() {
+    const pendingTokenBuffer = pendingTokenBufferRef.current;
+    pendingTokenBufferRef.current = {};
+    tokenFlushFrameRef.current = null;
+
+    for (const [sessionId, tokenByMessageId] of Object.entries(pendingTokenBuffer)) {
+      queryClient.setQueryData<ChatMessage[]>(
+        codemindQueryKeys.messages(sessionId),
+        (currentMessages = []) =>
+          currentMessages.map((message) => {
+            const pendingToken = tokenByMessageId[message.id];
+            return pendingToken
+              ? { ...message, content: `${message.content}${pendingToken}` }
+              : message;
+          }),
+      );
+    }
+  }
+
   function dismissToast(toastId: string) {
     setToasts((currentToasts) => currentToasts.filter((toast) => toast.id !== toastId));
   }
@@ -594,6 +626,7 @@ export function ChatPanel({ session, onSelectDiff, selectedDiffId }: ChatPanelPr
 
       <ApprovalQueue
         sessionId={session?.id ?? null}
+        projectRoot={session?.projectRoot ?? null}
         selectedDiffId={selectedDiffId}
         onSelectDiff={onSelectDiff}
         onNotify={showToast}
@@ -1144,12 +1177,10 @@ function createActivityDetails(activityMessage: ActivityEntry) {
     const legacyCommandMatch = activityMessage.message.match(/^Running `([\s\S]*)`$/);
     const commandText = activityMessage.detail ?? legacyCommandMatch?.[1] ?? activityMessage.message;
     const outputText = activityMessage.output?.trimEnd();
-    const fullText = outputText
-      ? `Command\n${commandText}\n\nOutput\n${outputText}`
-      : `Command\n${commandText}`;
+    const fullText = outputText ? `${commandText}\n\n${outputText}` : commandText;
 
     return {
-      title: "Running command",
+      title: commandText,
       fullText,
     };
   }

@@ -2,14 +2,16 @@ use crate::models::{FileTreeNode, ProjectFile, ProjectSearchResult};
 use anyhow::{bail, Context, Result};
 use ignore::WalkBuilder;
 use std::fs;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use uuid::Uuid;
 
 const MAX_FILE_BYTES: u64 = 512 * 1024;
 const MAX_DIRECTORY_ENTRIES: usize = 2_000;
 const MAX_SEARCH_RESULTS: usize = 80;
 
 pub fn read_project_tree(project_root: String) -> Result<FileTreeNode> {
-    let root_path = fs::canonicalize(&project_root).context("project folder does not exist")?;
+    let root_path = canonicalize_project_root(&project_root)?;
     let root_name = root_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -30,7 +32,7 @@ pub fn read_project_directory(
     project_root: String,
     relative_path: String,
 ) -> Result<Vec<FileTreeNode>> {
-    let root_path = fs::canonicalize(&project_root).context("project folder does not exist")?;
+    let root_path = canonicalize_project_root(&project_root)?;
     let directory_path = if relative_path.trim().is_empty() {
         root_path.clone()
     } else {
@@ -45,7 +47,7 @@ pub fn read_project_directory(
 }
 
 pub fn read_project_file(project_root: String, relative_path: String) -> Result<ProjectFile> {
-    let root_path = fs::canonicalize(project_root)?;
+    let root_path = canonicalize_project_root(&project_root)?;
     let file_path = resolve_project_path(&root_path, &relative_path)?;
     let metadata = fs::metadata(&file_path)?;
     if metadata.len() > MAX_FILE_BYTES {
@@ -70,7 +72,7 @@ pub fn search_project_files(
         return Ok(Vec::new());
     }
 
-    let root_path = fs::canonicalize(&project_root).context("project folder does not exist")?;
+    let root_path = canonicalize_project_root(&project_root)?;
     let mut results = Vec::new();
 
     for entry in WalkBuilder::new(&root_path)
@@ -124,6 +126,8 @@ pub fn search_project_files(
 }
 
 pub fn resolve_project_path(project_root: &Path, relative_path: &str) -> Result<PathBuf> {
+    let canonical_project_root = fs::canonicalize(project_root)
+        .context("project folder does not exist")?;
     let requested_relative_path = Path::new(relative_path);
     if requested_relative_path.components().any(|component| {
         matches!(
@@ -134,14 +138,24 @@ pub fn resolve_project_path(project_root: &Path, relative_path: &str) -> Result<
         bail!("path must stay inside the selected project");
     }
 
-    let candidate_path = project_root.join(requested_relative_path);
+    let candidate_path = canonical_project_root.join(requested_relative_path);
+    if candidate_path.exists() {
+        let canonical_candidate_path = fs::canonicalize(&candidate_path)?;
+        if !canonical_candidate_path.starts_with(&canonical_project_root) {
+            bail!("path escapes the selected project");
+        }
+        return Ok(canonical_candidate_path);
+    }
+
     let canonical_parent = candidate_path
         .parent()
-        .map(fs::canonicalize)
+        .map(|parent_path| {
+            canonicalize_existing_ancestor(parent_path, &canonical_project_root)
+        })
         .transpose()?
-        .unwrap_or_else(|| project_root.to_path_buf());
+        .unwrap_or_else(|| canonical_project_root.clone());
 
-    if !canonical_parent.starts_with(project_root) {
+    if !canonical_parent.starts_with(&canonical_project_root) {
         bail!("path escapes the selected project");
     }
 
@@ -153,16 +167,79 @@ pub fn write_file_atomically(
     relative_path: String,
     content: String,
 ) -> Result<()> {
-    let root_path = fs::canonicalize(project_root)?;
+    let root_path = canonicalize_project_root(&project_root)?;
     let target_path = resolve_project_path(&root_path, &relative_path)?;
     if let Some(parent_directory) = target_path.parent() {
         fs::create_dir_all(parent_directory)?;
     }
 
-    let temporary_path = target_path.with_extension("codemind.tmp");
-    fs::write(&temporary_path, content)?;
-    fs::rename(temporary_path, target_path)?;
+    let parent_directory = target_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("target file has no parent folder"))?;
+    let temporary_path = parent_directory.join(format!(
+        ".{}.{}.codemind.tmp",
+        target_path
+            .file_name()
+            .and_then(|file_name| file_name.to_str())
+            .unwrap_or("file"),
+        Uuid::new_v4()
+    ));
+
+    let write_result = (|| -> Result<()> {
+        let mut temporary_file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)?;
+        temporary_file.write_all(content.as_bytes())?;
+        temporary_file.flush()?;
+        temporary_file.sync_all()?;
+        drop(temporary_file);
+        fs::rename(&temporary_path, &target_path)?;
+        if let Ok(parent_directory_handle) = fs::File::open(parent_directory) {
+            let _ = parent_directory_handle.sync_all();
+        }
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temporary_path);
+    }
+
+    write_result?;
     Ok(())
+}
+
+pub fn is_not_found_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io_error| io_error.kind() == std::io::ErrorKind::NotFound)
+    })
+}
+
+fn canonicalize_project_root(project_root: &str) -> Result<PathBuf> {
+    fs::canonicalize(project_root).context("project folder does not exist")
+}
+
+fn canonicalize_existing_ancestor(
+    requested_parent_path: &Path,
+    canonical_project_root: &Path,
+) -> Result<PathBuf> {
+    let mut current_path = requested_parent_path;
+    loop {
+        if current_path.exists() {
+            return fs::canonicalize(current_path)
+                .context("failed to verify target folder stays inside project");
+        }
+
+        if current_path == canonical_project_root {
+            return Ok(canonical_project_root.to_path_buf());
+        }
+
+        current_path = current_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("path must stay inside the selected project"))?;
+    }
 }
 
 fn read_project_directory_nodes(
@@ -172,6 +249,7 @@ fn read_project_directory_nodes(
     let mut child_nodes = fs::read_dir(directory_path)?
         .filter_map(|entry_result| entry_result.ok())
         .filter(|entry| should_show_directory_entry(entry.path().as_path()))
+        .filter(|entry| is_path_inside_project(root_path, entry.path().as_path()))
         .take(MAX_DIRECTORY_ENTRIES)
         .map(|entry| {
             let child_path = entry.path();
@@ -228,6 +306,12 @@ fn should_show_directory_entry(path: &Path) -> bool {
     )
 }
 
+fn is_path_inside_project(root_path: &Path, path: &Path) -> bool {
+    fs::canonicalize(path)
+        .map(|canonical_path| canonical_path.starts_with(root_path))
+        .unwrap_or(true)
+}
+
 fn detect_language(file_path: &Path) -> String {
     match file_path
         .extension()
@@ -247,4 +331,74 @@ fn detect_language(file_path: &Path) -> String {
         _ => "plaintext",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_project_path_rejects_parent_segments() {
+        let project_root = create_test_directory("path-parent");
+
+        let error = resolve_project_path(&project_root, "../outside.txt")
+            .expect_err("parent traversal should fail");
+
+        assert!(error.to_string().contains("selected project"));
+        let _ = fs::remove_dir_all(project_root);
+    }
+
+    #[test]
+    fn write_file_atomically_replaces_existing_file() {
+        let project_root = create_test_directory("atomic-write");
+        fs::write(project_root.join("note.txt"), "old").expect("old file written");
+
+        write_file_atomically(
+            project_root.to_string_lossy().to_string(),
+            "note.txt".to_string(),
+            "new".to_string(),
+        )
+        .expect("file can be written atomically");
+
+        assert_eq!(
+            fs::read_to_string(project_root.join("note.txt")).expect("file can be read"),
+            "new"
+        );
+        assert!(
+            fs::read_dir(&project_root)
+                .expect("project can be listed")
+                .all(|entry| !entry
+                    .expect("entry can be read")
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("codemind.tmp"))
+        );
+        let _ = fs::remove_dir_all(project_root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_project_path_rejects_symlink_that_points_outside_project() {
+        use std::os::unix::fs::symlink;
+
+        let project_root = create_test_directory("symlink-root");
+        let outside_root = create_test_directory("symlink-outside");
+        let outside_file = outside_root.join("secret.txt");
+        fs::write(&outside_file, "secret").expect("outside file written");
+        symlink(&outside_file, project_root.join("linked-secret.txt"))
+            .expect("symlink created");
+
+        let error = resolve_project_path(&project_root, "linked-secret.txt")
+            .expect_err("outside symlink should fail");
+
+        assert!(error.to_string().contains("escapes"));
+        let _ = fs::remove_dir_all(project_root);
+        let _ = fs::remove_dir_all(outside_root);
+    }
+
+    fn create_test_directory(prefix: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("codemind-{prefix}-{}", Uuid::new_v4()));
+        fs::create_dir_all(&path).expect("test directory created");
+        fs::canonicalize(path).expect("test directory canonicalized")
+    }
 }

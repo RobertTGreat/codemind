@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { tauriCodemindRepository } from "../../../infrastructure/tauri/codemindRepository";
 import { Button } from "../../components/button/Button";
 import { Badge } from "../../components/badge/Badge";
@@ -73,6 +73,7 @@ const OPEN_VSX_BASE_URL = "https://open-vsx.org";
 type OpenVsxSortMode = "downloads" | "rating" | "name" | "updated";
 
 export function OpenVsxSidebar({ projectRoot, width, onResize }: OpenVsxSidebarProps) {
+  const [previewWidth, setPreviewWidth] = useState<number | null>(null);
   const [searchText, setSearchText] = useState("");
   const [searchResults, setSearchResults] = useState<OpenVsxExtensionSummary[]>([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -94,6 +95,7 @@ export function OpenVsxSidebar({ projectRoot, width, onResize }: OpenVsxSidebarP
     () => sortOpenVsxResults(searchResults, sortMode),
     [searchResults, sortMode],
   );
+  const displayedWidth = previewWidth ?? width;
 
   useEffect(() => {
     if (normalizedSearchText.length < 2) {
@@ -226,7 +228,7 @@ export function OpenVsxSidebar({ projectRoot, width, onResize }: OpenVsxSidebarP
   return (
     <aside
       className="relative flex h-full shrink-0 flex-col overflow-hidden border-r border-zinc-800 bg-[#181818]"
-      style={{ width }}
+      style={{ width: displayedWidth }}
     >
       <div className="flex h-10 shrink-0 items-end gap-1 border-b border-zinc-800 px-2">
         <label className="flex h-9 min-w-0 flex-1 items-center gap-2 rounded-t-md border border-b-0 border-transparent bg-transparent px-3 text-zinc-400 focus-within:border-zinc-700">
@@ -304,7 +306,14 @@ export function OpenVsxSidebar({ projectRoot, width, onResize }: OpenVsxSidebarP
           onClose={() => setSelectedExtension(null)}
         />
       ) : null}
-      <SidebarResizeHandle initialWidth={width} onResize={onResize} />
+      <SidebarResizeHandle
+        initialWidth={displayedWidth}
+        onPreview={setPreviewWidth}
+        onResize={(nextWidth) => {
+          setPreviewWidth(null);
+          onResize(nextWidth);
+        }}
+      />
     </aside>
   );
 }
@@ -546,18 +555,34 @@ function ExtensionDetailsOverlay({
 
 function SidebarResizeHandle({
   initialWidth,
+  onPreview,
   onResize,
 }: {
   initialWidth: number;
+  onPreview: (width: number) => void;
   onResize: (width: number) => void;
 }) {
+  const animationFrameRef = useRef<number | null>(null);
+
   function handlePointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    event.currentTarget.setPointerCapture(event.pointerId);
     const startX = event.clientX;
     const startWidth = initialWidth;
     const handlePointerMove = (moveEvent: PointerEvent) => {
-      onResize(startWidth + moveEvent.clientX - startX);
+      const nextWidth = startWidth + moveEvent.clientX - startX;
+      if (animationFrameRef.current !== null) {
+        window.cancelAnimationFrame(animationFrameRef.current);
+      }
+      animationFrameRef.current = window.requestAnimationFrame(() => {
+        onPreview(nextWidth);
+      });
     };
-    const handlePointerUp = () => {
+    const handlePointerUp = (upEvent: PointerEvent) => {
+      if (animationFrameRef.current !== null) {
+        window.cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = null;
+      }
+      onResize(startWidth + upEvent.clientX - startX);
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
     };
@@ -569,6 +594,8 @@ function SidebarResizeHandle({
   return (
     <div
       className="absolute right-[-3px] top-0 z-40 h-full w-1.5 cursor-col-resize bg-transparent hover:bg-zinc-500"
+      role="separator"
+      aria-orientation="vertical"
       onPointerDown={handlePointerDown}
     />
   );

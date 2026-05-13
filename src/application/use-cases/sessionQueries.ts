@@ -5,6 +5,7 @@ import {
   type QueryClient,
 } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
+import { useEffect, useState } from "react";
 import type { GitOperationResult } from "../../domain/models/git";
 import { tauriCodemindRepository } from "../../infrastructure/tauri/codemindRepository";
 
@@ -156,10 +157,13 @@ export function useProjectDirectory(projectRoot: string | null, relativePath: st
 }
 
 export function useProjectSearch(projectRoot: string | null, query: string) {
+  const debouncedQuery = useDebouncedValue(query.trim(), 250);
   return useQuery({
-    queryKey: codemindQueryKeys.projectSearch(projectRoot, query),
-    enabled: Boolean(projectRoot && query.trim().length > 0),
-    queryFn: () => tauriCodemindRepository.searchProjectFiles(projectRoot ?? "", query),
+    queryKey: codemindQueryKeys.projectSearch(projectRoot, debouncedQuery),
+    enabled: Boolean(projectRoot && debouncedQuery.length >= 2),
+    queryFn: () =>
+      tauriCodemindRepository.searchProjectFiles(projectRoot ?? "", debouncedQuery),
+    placeholderData: (previousData) => previousData,
   });
 }
 
@@ -186,6 +190,7 @@ export function useSaveProjectFile(projectRoot: string | null, relativePath: str
         codemindQueryKeys.file(projectRoot, relativePath),
         projectFile,
       );
+      invalidateProjectFileState(queryClient, projectRoot, relativePath);
     },
   });
 }
@@ -198,16 +203,28 @@ export function usePendingDiffs(sessionId: string | null) {
   });
 }
 
-export function useApproveDiff(sessionId: string | null) {
+export function useApproveDiff(
+  sessionId: string | null,
+  projectRoot: string | null = null,
+) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (proposalId: string) =>
       tauriCodemindRepository.approveDiffProposal(proposalId),
-    onSuccess: () => {
+    onSuccess: (_result, proposalId) => {
+      const pendingDiffs =
+        queryClient.getQueryData<Awaited<ReturnType<typeof tauriCodemindRepository.listPendingDiffs>>>(
+          codemindQueryKeys.pendingDiffs(sessionId),
+        ) ?? [];
+      const approvedProposal = pendingDiffs.find((proposal) => proposal.id === proposalId);
       queryClient.invalidateQueries({
         queryKey: codemindQueryKeys.pendingDiffs(sessionId),
       });
-      queryClient.invalidateQueries();
+      invalidateProjectFileState(
+        queryClient,
+        projectRoot,
+        approvedProposal?.relativePath ?? null,
+      );
     },
   });
 }
@@ -246,12 +263,13 @@ export function useCreateDiffProposal(sessionId: string | null) {
   });
 }
 
-export function useGitStatus(projectRoot: string | null) {
+export function useGitStatus(projectRoot: string | null, isPollingEnabled = true) {
+  const isDocumentVisible = useDocumentVisibility();
   return useQuery({
     queryKey: codemindQueryKeys.gitStatus(projectRoot),
-    enabled: Boolean(projectRoot),
+    enabled: Boolean(projectRoot && isPollingEnabled),
     queryFn: () => tauriCodemindRepository.readGitRepositoryStatus(projectRoot ?? ""),
-    refetchInterval: 5_000,
+    refetchInterval: isDocumentVisible ? 5_000 : false,
   });
 }
 
@@ -335,6 +353,62 @@ export function useGitSync(projectRoot: string | null) {
 function invalidateGitProjectState(queryClient: QueryClient, projectRoot: string | null) {
   queryClient.invalidateQueries({ queryKey: codemindQueryKeys.gitStatus(projectRoot) });
   queryClient.invalidateQueries({ queryKey: codemindQueryKeys.projectTree(projectRoot) });
+}
+
+function invalidateProjectFileState(
+  queryClient: QueryClient,
+  projectRoot: string | null,
+  relativePath: string | null,
+) {
+  queryClient.invalidateQueries({ queryKey: codemindQueryKeys.projectTree(projectRoot) });
+  queryClient.invalidateQueries({
+    queryKey: ["project-directory", projectRoot],
+    exact: false,
+  });
+  queryClient.invalidateQueries({ queryKey: codemindQueryKeys.gitStatus(projectRoot) });
+  if (relativePath) {
+    queryClient.invalidateQueries({
+      queryKey: codemindQueryKeys.file(projectRoot, relativePath),
+    });
+  }
+}
+
+function useDebouncedValue(value: string, delayInMilliseconds: number) {
+  const [debouncedValue, setDebouncedValue] = useState(value);
+
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      setDebouncedValue(value);
+    }, delayInMilliseconds);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [delayInMilliseconds, value]);
+
+  return debouncedValue;
+}
+
+function useDocumentVisibility() {
+  const [isDocumentVisible, setIsDocumentVisible] = useState(() => {
+    if (typeof document === "undefined") {
+      return true;
+    }
+    return document.visibilityState === "visible";
+  });
+
+  useEffect(() => {
+    if (typeof document === "undefined") {
+      return undefined;
+    }
+
+    const handleVisibilityChange = () => {
+      setIsDocumentVisible(document.visibilityState === "visible");
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, []);
+
+  return isDocumentVisible;
 }
 
 export function getGitOperationErrorMessage(error: unknown) {

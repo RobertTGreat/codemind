@@ -289,6 +289,20 @@ const languageIdByGrammarName = new Map(
 const knownLanguageIds = new Set(
   editorLanguageDefinitions.map((definition) => definition.languageId),
 );
+const commonLanguageIds = new Set([
+  "css",
+  "html",
+  "javascript",
+  "javascriptreact",
+  "json",
+  "markdown",
+  "plaintext",
+  "rust",
+  "toml",
+  "typescript",
+  "typescriptreact",
+  "yaml",
+]);
 
 export function getEditorLanguageId(
   selectedFilePath: string | null,
@@ -331,11 +345,57 @@ export function registerEditorLanguages(monaco: {
     }): void;
   };
 }) {
+  registerEditorLanguageDefinitions(
+    monaco,
+    editorLanguageDefinitions.filter((definition) =>
+      commonLanguageIds.has(definition.languageId),
+    ),
+  );
+}
+
+export function registerEditorLanguage(
+  monaco: {
+    languages: {
+      getLanguages(): Array<{ id: string }>;
+      register(language: {
+        id: string;
+        aliases?: string[];
+        extensions?: string[];
+        filenames?: string[];
+      }): void;
+    };
+  },
+  languageId: string,
+) {
+  const languageDefinition = editorLanguageDefinitions.find(
+    (definition) => definition.languageId === languageId,
+  );
+  if (!languageDefinition) {
+    return;
+  }
+
+  registerEditorLanguageDefinitions(monaco, [languageDefinition]);
+}
+
+function registerEditorLanguageDefinitions(
+  monaco: {
+    languages: {
+      getLanguages(): Array<{ id: string }>;
+      register(language: {
+        id: string;
+        aliases?: string[];
+        extensions?: string[];
+        filenames?: string[];
+      }): void;
+    };
+  },
+  languageDefinitions: EditorLanguageDefinition[],
+) {
   const registeredLanguageIds = new Set(
     monaco.languages.getLanguages().map((registeredLanguage) => registeredLanguage.id),
   );
 
-  for (const definition of editorLanguageDefinitions) {
+  for (const definition of languageDefinitions) {
     if (registeredLanguageIds.has(definition.languageId)) {
       continue;
     }

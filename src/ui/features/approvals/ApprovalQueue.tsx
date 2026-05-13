@@ -10,6 +10,7 @@ import { Badge } from "../../components/badge/Badge";
 
 interface ApprovalQueueProps {
   sessionId: string | null;
+  projectRoot: string | null;
   selectedDiffId: string | null;
   onSelectDiff: (proposal: DiffProposal | null) => void;
   onNotify?: (notification: { title: string; description?: string; kind: "success" | "error" | "info" }) => void;
@@ -17,12 +18,13 @@ interface ApprovalQueueProps {
 
 export function ApprovalQueue({
   sessionId,
+  projectRoot,
   selectedDiffId,
   onSelectDiff,
   onNotify,
 }: ApprovalQueueProps) {
   const pendingDiffs = usePendingDiffs(sessionId);
-  const approveDiff = useApproveDiff(sessionId);
+  const approveDiff = useApproveDiff(sessionId, projectRoot);
   const rejectDiff = useRejectDiff(sessionId);
 
   if (!sessionId) {

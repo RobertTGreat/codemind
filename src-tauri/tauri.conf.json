@@ -20,7 +20,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self' customprotocol: asset: http://asset.localhost; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://open-vsx.org https://*.open-vsx.org; connect-src 'self' ipc: http://ipc.localhost https://open-vsx.org https://*.open-vsx.org; font-src 'self' data:; worker-src 'self' blob:"
     }
   },
   "bundle": {

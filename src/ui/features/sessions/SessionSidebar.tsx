@@ -45,6 +45,7 @@ export function SessionSidebar({ sessions, selectedSession }: SessionSidebarProp
   const [sessionFilter, setSessionFilter] = useState<ProjectFilter>("all");
   const [sessionShowMode, setSessionShowMode] = useState<SessionFilter>("all");
   const [sessionSort, setSessionSort] = useState<SessionSort>("recent");
+  const [sessionPendingDelete, setSessionPendingDelete] = useState<Session | null>(null);
   const selectedSessionId = useWorkspaceStore((store) => store.selectedSessionId);
   const setSelectedSessionId = useWorkspaceStore((store) => store.setSelectedSessionId);
   const setSelectedFilePath = useWorkspaceStore((store) => store.setSelectedFilePath);
@@ -258,10 +259,7 @@ export function SessionSidebar({ sessions, selectedSession }: SessionSidebarProp
                           setSelectedFilePath(null);
                         }}
                         onArchive={() => void handleArchiveSession(session)}
-                        onDelete={async () => {
-                          await tauriCodemindRepository.deleteSession(session.id);
-                          await queryClient.invalidateQueries({ queryKey: codemindQueryKeys.sessions });
-                        }}
+                        onDelete={() => setSessionPendingDelete(session)}
                       />
                     ))}
                   </div>
@@ -284,6 +282,21 @@ export function SessionSidebar({ sessions, selectedSession }: SessionSidebarProp
           }}
         />
       ) : null}
+      {sessionPendingDelete ? (
+        <ConfirmSessionDeleteDialog
+          session={sessionPendingDelete}
+          onCancel={() => setSessionPendingDelete(null)}
+          onConfirm={async () => {
+            await tauriCodemindRepository.deleteSession(sessionPendingDelete.id);
+            if (selectedSessionId === sessionPendingDelete.id) {
+              setSelectedSessionId(null);
+              setSelectedFilePath(null);
+            }
+            setSessionPendingDelete(null);
+            await queryClient.invalidateQueries({ queryKey: codemindQueryKeys.sessions });
+          }}
+        />
+      ) : null}
     </aside>
   );
 }
@@ -302,37 +315,74 @@ function SessionRow({
   onDelete: () => void;
 }) {
   return (
-    <button
+    <div
       className={cn(
         "group/session mb-1 flex w-full items-center gap-2 rounded-md border border-transparent px-2 py-1.5 text-left transition hover:bg-zinc-800",
         isSelected && "border-zinc-600 bg-zinc-800",
       )}
-      onClick={onSelect}
     >
-      <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-100">
+      <button
+        type="button"
+        className="min-w-0 flex-1 truncate text-left text-xs font-medium text-zinc-100"
+        onClick={onSelect}
+      >
         {session.title}
-      </span>
+      </button>
       <span className="flex h-5 w-11 shrink-0 items-center justify-end gap-1 opacity-0 transition-opacity group-hover/session:opacity-100">
-        <span
+        <button
+          type="button"
           className="inline-flex h-5 w-5 items-center justify-center rounded text-zinc-400 hover:bg-zinc-700"
-          onClick={(event) => {
-            event.stopPropagation();
-            onArchive();
-          }}
+          title={session.isArchived ? "Restore session" : "Archive session"}
+          aria-label={session.isArchived ? "Restore session" : "Archive session"}
+          onClick={onArchive}
         >
           <Archive size={12} />
-        </span>
-        <span
+        </button>
+        <button
+          type="button"
           className="inline-flex h-5 w-5 items-center justify-center rounded text-red-300 hover:bg-red-500/15"
-          onClick={(event) => {
-            event.stopPropagation();
-            onDelete();
-          }}
+          title="Delete session"
+          aria-label="Delete session"
+          onClick={onDelete}
         >
           <Trash2 size={12} />
-        </span>
+        </button>
       </span>
-    </button>
+    </div>
+  );
+}
+
+function ConfirmSessionDeleteDialog({
+  session,
+  onCancel,
+  onConfirm,
+}: {
+  session: Session;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/55 p-4">
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-label="Delete session"
+        className="w-full max-w-sm rounded-lg border border-red-500/30 bg-[#1f1f1f] p-4 shadow-2xl"
+      >
+        <h2 className="text-sm font-semibold text-zinc-100">Delete session?</h2>
+        <p className="mt-2 text-xs leading-5 text-zinc-400">
+          This permanently removes "{session.title}" and its local messages, approvals, and diffs.
+        </p>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button className="h-8 px-3 text-xs" variant="secondary" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button className="h-8 px-3 text-xs" variant="danger" onClick={onConfirm}>
+            Delete
+          </Button>
+        </div>
+      </section>
+    </div>
   );
 }
 

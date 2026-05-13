@@ -7,7 +7,12 @@ import type {
   ProviderInstallStatus,
 } from "../models/providerInstall";
 import type { ChatMessage, Session } from "../models/session";
-import type { ShellCommandOutput, ShellKind } from "../models/shell";
+import type {
+  ResolvedShellDirectory,
+  ShellCommandRun,
+  ShellCommandOutput,
+  ShellKind,
+} from "../models/shell";
 
 export interface CodemindRepository {
   listSessions(): Promise<Session[]>;
@@ -53,6 +58,17 @@ export interface CodemindRepository {
     command: string,
     shellKind: ShellKind,
   ): Promise<ShellCommandOutput>;
+  startShellCommand(
+    currentDirectory: string | null,
+    command: string,
+    shellKind: ShellKind,
+    runId: string,
+  ): Promise<ShellCommandRun>;
+  stopShellCommand(runId: string): Promise<void>;
+  resolveShellDirectory(
+    currentDirectory: string | null,
+    requestedDirectory: string,
+  ): Promise<ResolvedShellDirectory>;
   runProviderLogin(agentId: string): Promise<void>;
   getProviderInstallStatus(agentId: string): Promise<ProviderInstallStatus>;
   installProvider(agentId: string): Promise<ProviderInstallResult>;

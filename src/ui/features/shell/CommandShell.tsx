@@ -1,6 +1,11 @@
-import { Terminal, Trash2, X } from "lucide-react";
+import { listen } from "@tauri-apps/api/event";
+import { Copy, Square, Terminal, Trash2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import type { ShellCommandOutput, ShellKind } from "../../../domain/models/shell";
+import type {
+  ShellCommandOutput,
+  ShellKind,
+  ShellOutputEvent,
+} from "../../../domain/models/shell";
 import { tauriCodemindRepository } from "../../../infrastructure/tauri/codemindRepository";
 import { useWorkspaceStore } from "../../../stores/workspaceStore";
 import { Button } from "../../components/button/Button";
@@ -11,6 +16,8 @@ interface CommandShellProps {
 
 interface ShellHistoryEntry extends ShellCommandOutput {
   id: string;
+  completedAt: string;
+  startedAt: string;
 }
 
 export function CommandShell({ projectRoot }: CommandShellProps) {
@@ -19,6 +26,8 @@ export function CommandShell({ projectRoot }: CommandShellProps) {
   const [isRunning, setIsRunning] = useState(false);
   const [shellKind, setShellKind] = useState<ShellKind>("powerShell");
   const [currentDirectory, setCurrentDirectory] = useState(projectRoot ?? "");
+  const [previousDirectory, setPreviousDirectory] = useState<string | null>(null);
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const toggleShell = useWorkspaceStore((store) => store.toggleShell);
@@ -34,6 +43,48 @@ export function CommandShell({ projectRoot }: CommandShellProps) {
     });
   }, [historyEntries]);
 
+  useEffect(() => {
+    const unlistenPromise = listen<ShellOutputEvent>("shell-output", (event) => {
+      const shellOutput = event.payload;
+      setHistoryEntries((currentEntries) =>
+        currentEntries.map((entry) => {
+          if (entry.id !== shellOutput.runId) {
+            return entry;
+          }
+
+          return {
+            ...entry,
+            cwd: shellOutput.cwd,
+            exitCode: shellOutput.isComplete ? shellOutput.exitCode : entry.exitCode,
+            stdout:
+              shellOutput.stream === "stdout"
+                ? `${entry.stdout}${shellOutput.chunk}`
+                : entry.stdout,
+            stderr:
+              shellOutput.stream === "stderr"
+                ? `${entry.stderr}${shellOutput.chunk}`
+                : entry.stderr,
+            completedAt: shellOutput.isComplete
+              ? new Date().toISOString()
+              : entry.completedAt,
+          };
+        }),
+      );
+
+      if (shellOutput.isComplete) {
+        setActiveRunId((currentRunId) =>
+          currentRunId === shellOutput.runId ? null : currentRunId,
+        );
+        setIsRunning(false);
+        setCurrentDirectory(shellOutput.cwd);
+      }
+    });
+
+    return () => {
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, []);
+
   async function handleRunCommand() {
     const command = commandText.trim();
     if (!command || isRunning) {
@@ -46,53 +97,146 @@ export function CommandShell({ projectRoot }: CommandShellProps) {
       return;
     }
 
-    if (command.toLowerCase().startsWith("cd ")) {
-      const nextDirectory = resolveNextDirectory(currentDirectory, command.slice(3).trim());
-      setCurrentDirectory(nextDirectory);
-      setHistoryEntries((currentEntries) => [
-        ...currentEntries,
-        {
-          id: crypto.randomUUID(),
+    if (isChangeDirectoryCommand(command)) {
+      const startedAt = new Date().toISOString();
+      const requestedDirectory = getRequestedDirectory(command, previousDirectory);
+      if (requestedDirectory === null) {
+        appendHistoryEntry({
           command,
-          cwd: nextDirectory,
-          exitCode: 0,
+          cwd: currentDirectory || projectRoot || "",
+          exitCode: 1,
           stdout: "",
-          stderr: "",
-        },
-      ]);
-      setCommandText("");
-      return;
-    }
+          stderr: "No previous directory.",
+          startedAt,
+        });
+        setCommandText("");
+        return;
+      }
 
-    setIsRunning(true);
-    setCommandText("");
-    setHistoryIndex(null);
-    try {
-      const output = await tauriCodemindRepository.runShellCommand(
-        currentDirectory || projectRoot,
-        command,
-        shellKind,
-      );
-      setHistoryEntries((currentEntries) => [
-        ...currentEntries,
-        { ...output, id: crypto.randomUUID() },
-      ]);
-      setCurrentDirectory(output.cwd);
-    } catch (error) {
       setHistoryEntries((currentEntries) => [
         ...currentEntries,
         {
           id: crypto.randomUUID(),
           command,
           cwd: currentDirectory || projectRoot || "",
-          exitCode: 1,
+          exitCode: null,
           stdout: "",
-          stderr: error instanceof Error ? error.message : String(error),
+          stderr: "",
+          startedAt,
+          completedAt: startedAt,
         },
       ]);
-    } finally {
+      setCommandText("");
+      try {
+        const resolvedDirectory = await tauriCodemindRepository.resolveShellDirectory(
+          currentDirectory || projectRoot,
+          requestedDirectory,
+        );
+        setPreviousDirectory(currentDirectory || projectRoot || null);
+        setCurrentDirectory(resolvedDirectory.cwd);
+        updateLastHistoryEntry({
+          cwd: resolvedDirectory.cwd,
+          exitCode: 0,
+          stdout: resolvedDirectory.cwd,
+          stderr: "",
+        });
+      } catch (error) {
+        updateLastHistoryEntry({
+          exitCode: 1,
+          stderr: error instanceof Error ? error.message : String(error),
+        });
+      }
+      return;
+    }
+
+    const startedAt = new Date().toISOString();
+    const runId = crypto.randomUUID();
+    setIsRunning(true);
+    setActiveRunId(runId);
+    setCommandText("");
+    setHistoryIndex(null);
+    setHistoryEntries((currentEntries) => [
+      ...currentEntries,
+      {
+        id: runId,
+        command,
+        cwd: currentDirectory || projectRoot || "",
+        exitCode: null,
+        stdout: "",
+        stderr: "",
+        startedAt,
+        completedAt: startedAt,
+      },
+    ]);
+    try {
+      await tauriCodemindRepository.startShellCommand(
+        currentDirectory || projectRoot,
+        command,
+        shellKind,
+        runId,
+      );
+    } catch (error) {
+      updateHistoryEntry(runId, {
+        exitCode: 1,
+        stderr: error instanceof Error ? error.message : String(error),
+      });
+      setActiveRunId(null);
       setIsRunning(false);
     }
+  }
+
+  function appendHistoryEntry(entry: Omit<ShellHistoryEntry, "id" | "completedAt">) {
+    setHistoryEntries((currentEntries) => [
+      ...currentEntries,
+      {
+        ...entry,
+        id: crypto.randomUUID(),
+        completedAt: new Date().toISOString(),
+      },
+    ]);
+  }
+
+  function updateLastHistoryEntry(entryPatch: Partial<ShellHistoryEntry>) {
+    updateHistoryEntryByIndex((currentEntries) => currentEntries.length - 1, entryPatch);
+  }
+
+  function updateHistoryEntry(entryId: string, entryPatch: Partial<ShellHistoryEntry>) {
+    setHistoryEntries((currentEntries) =>
+      currentEntries.map((entry) =>
+        entry.id === entryId
+          ? { ...entry, ...entryPatch, completedAt: new Date().toISOString() }
+          : entry,
+      ),
+    );
+  }
+
+  function updateHistoryEntryByIndex(
+    selectEntryIndex: (currentEntries: ShellHistoryEntry[]) => number,
+    entryPatch: Partial<ShellHistoryEntry>,
+  ) {
+    setHistoryEntries((currentEntries) => {
+      const selectedEntryIndex = selectEntryIndex(currentEntries);
+      return currentEntries.map((entry, entryIndex) =>
+        entryIndex === selectedEntryIndex
+          ? { ...entry, ...entryPatch, completedAt: new Date().toISOString() }
+          : entry,
+      );
+    });
+  }
+
+  async function handleStopCommand() {
+    if (!activeRunId) {
+      return;
+    }
+    await tauriCodemindRepository.stopShellCommand(activeRunId);
+  }
+
+  async function copyEntryOutput(entry: ShellHistoryEntry) {
+    const outputText = [entry.stdout, entry.stderr].filter(Boolean).join("\n");
+    if (!outputText) {
+      return;
+    }
+    await navigator.clipboard.writeText(outputText);
   }
 
   function handleHistoryNavigation(direction: -1 | 1) {
@@ -133,6 +277,15 @@ export function CommandShell({ projectRoot }: CommandShellProps) {
             icon={<Trash2 size={14} />}
             onClick={() => setHistoryEntries([])}
           />
+          {activeRunId ? (
+            <Button
+              className="h-7 w-7 px-0"
+              variant="danger"
+              title="Stop command"
+              icon={<Square size={13} />}
+              onClick={() => void handleStopCommand()}
+            />
+          ) : null}
           <Button
             className="h-7 w-7 px-0"
             variant="ghost"
@@ -146,9 +299,34 @@ export function CommandShell({ projectRoot }: CommandShellProps) {
       <div ref={scrollContainerRef} className="min-h-0 flex-1 overflow-y-auto p-3 font-mono text-xs">
         {historyEntries.map((entry) => (
           <div key={entry.id} className="mb-3">
-            <div className="mb-1 text-zinc-400">
+            <div className="mb-1 flex flex-wrap items-center gap-2 text-zinc-400">
               <span className="text-zinc-500">{formatDirectory(entry.cwd)}</span>
-              <span className="text-zinc-300"> &gt; {entry.command}</span>
+              <span className="min-w-0 flex-1 text-zinc-300"> &gt; {entry.command}</span>
+              <span
+                className={`rounded border px-1.5 py-0.5 text-[10px] ${
+                  entry.exitCode === 0
+                    ? "border-emerald-500/30 text-emerald-200"
+                    : entry.exitCode === null
+                      ? "border-sky-500/30 text-sky-200"
+                      : "border-red-500/30 text-red-200"
+                }`}
+              >
+                {entry.exitCode === null ? "running" : `exit ${entry.exitCode}`}
+              </span>
+              <span className="text-[10px] text-zinc-600">
+                {formatShellTimestamp(entry.completedAt)}
+              </span>
+              {entry.stdout || entry.stderr ? (
+                <button
+                  type="button"
+                  className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+                  title="Copy output"
+                  aria-label="Copy command output"
+                  onClick={() => void copyEntryOutput(entry)}
+                >
+                  <Copy size={12} />
+                </button>
+              ) : null}
             </div>
             {entry.stdout ? (
               <pre className="select-text whitespace-pre-wrap text-zinc-300">{entry.stdout}</pre>
@@ -186,17 +364,24 @@ export function CommandShell({ projectRoot }: CommandShellProps) {
   );
 }
 
-function resolveNextDirectory(currentDirectory: string, requestedDirectory: string): string {
-  if (!requestedDirectory || requestedDirectory === ".") {
-    return currentDirectory;
+function isChangeDirectoryCommand(command: string): boolean {
+  return /^cd(?:\s+|$)/i.test(command);
+}
+
+function getRequestedDirectory(command: string, previousDirectory: string | null): string | null {
+  const requestedDirectory = command.replace(/^cd(?:\s+)?/i, "").trim();
+  if (requestedDirectory === "-") {
+    return previousDirectory;
   }
-  if (requestedDirectory === "..") {
-    return currentDirectory.replace(/[\\/][^\\/]+[\\/]?$/, "");
-  }
-  if (/^[a-zA-Z]:[\\/]/.test(requestedDirectory) || requestedDirectory.startsWith("\\\\")) {
-    return requestedDirectory;
-  }
-  return `${currentDirectory.replace(/[\\/]$/, "")}\\${requestedDirectory}`;
+  return requestedDirectory;
+}
+
+function formatShellTimestamp(timestamp: string): string {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(new Date(timestamp));
 }
 
 function formatDirectory(directory: string): string {
