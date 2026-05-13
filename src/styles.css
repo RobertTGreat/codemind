@@ -1,0 +1,72 @@
+@import "tailwindcss";
+
+:root {
+  color: #e8eaed;
+  background: #101214;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+body {
+  overflow: hidden;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #3f464c;
+  border: 2px solid #15181b;
+  border-radius: 999px;
+}
+
+.codemind-line-new {
+  background: rgba(16, 185, 129, 0.18);
+}
+
+.codemind-line-changed {
+  background: rgba(249, 115, 22, 0.18);
+}
+
+.codemind-glyph-new::before,
+.codemind-glyph-changed::before {
+  content: "";
+  display: block;
+  height: 8px;
+  width: 8px;
+  margin: 5px auto 0;
+  border-radius: 999px;
+}
+
+.codemind-glyph-new::before {
+  background: #34d399;
+}
+
+.codemind-glyph-changed::before {
+  background: #fb923c;
+}
