@@ -94,8 +94,8 @@ export function SettingsDialog({
   }
 
   return (
-    <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/50">
-      <section className="flex max-h-[88vh] w-[720px] flex-col rounded-md border border-zinc-800 bg-[#1e1e1e] shadow-2xl">
+    <div className="absolute inset-0 z-40 flex items-center justify-center bg-[#121212]/70">
+      <section className="flex max-h-[88vh] w-[720px] flex-col rounded-md border border-zinc-800 bg-[#1f1f1f] shadow-2xl">
         <div className="flex h-12 items-center justify-between border-b border-zinc-800 px-4">
           <div className="flex items-center gap-2 text-sm font-semibold text-zinc-100">
             <Settings size={16} />
@@ -233,7 +233,7 @@ export function SettingsDialog({
                       "flex items-start gap-2 rounded-md border p-3 text-left transition",
                       isSelected
                         ? "border-emerald-500/30 bg-emerald-500/10"
-                        : "border-zinc-800 bg-zinc-950 hover:border-zinc-700",
+                        : "border-zinc-800 bg-[#242424] hover:border-zinc-700",
                     )}
                     onClick={() => {
                       setCompatibilityStatus(null);
@@ -291,7 +291,7 @@ export function SettingsDialog({
               {[projectMcpToolUsage, ...agentMcpToolUsage].map((toolUsage) => (
                 <div
                   key={`${toolUsage.providerId}-${toolUsage.scope}-${toolUsage.title}`}
-                  className="rounded-md border border-zinc-800 bg-zinc-950 p-3"
+                  className="rounded-md border border-zinc-800 bg-[#242424] p-3"
                 >
                   <div className="mb-2 flex items-start justify-between gap-3">
                     <div>
@@ -309,7 +309,7 @@ export function SettingsDialog({
                       onClick={() => void copyTextToClipboard(toolUsage.commandOrConfig)}
                     />
                   </div>
-                  <pre className="max-h-32 overflow-auto rounded border border-zinc-800 bg-[#171717] p-2 text-xs leading-5 text-zinc-300">
+                  <pre className="max-h-32 overflow-auto rounded border border-zinc-800 bg-[#2a2a2a] p-2 text-xs leading-5 text-zinc-300">
                     <code>{toolUsage.commandOrConfig}</code>
                   </pre>
                 </div>
@@ -323,7 +323,7 @@ export function SettingsDialog({
               {agentProviders.map((provider) => (
                 <div
                   key={provider.id}
-                  className="flex items-center justify-between rounded-md border border-zinc-800 bg-zinc-950 p-3"
+                  className="flex items-center justify-between rounded-md border border-zinc-800 bg-[#242424] p-3"
                 >
                   <div>
                     <p className="text-sm text-zinc-100">{provider.name}</p>
@@ -361,7 +361,7 @@ function RuleTextArea({
     <label className="block">
       <span className="mb-1 block text-xs font-medium text-zinc-400">{label}</span>
       <textarea
-        className="h-32 w-full resize-none rounded-md border border-zinc-800 bg-zinc-950 p-2 text-sm leading-5 text-zinc-100 outline-none placeholder:text-zinc-600 disabled:cursor-not-allowed disabled:opacity-50"
+        className="h-32 w-full resize-none rounded-md border border-zinc-800 bg-[#242424] p-2 text-sm leading-5 text-zinc-100 outline-none placeholder:text-zinc-600 disabled:cursor-not-allowed disabled:opacity-50"
         value={value}
         placeholder={placeholder}
         disabled={disabled}

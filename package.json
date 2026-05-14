@@ -13,6 +13,7 @@
     "tauri:build": "tauri build",
     "tauri:build:debug": "tauri build --debug",
     "release": "tauri build",
+    "nightly": "tauri build --no-bundle",
     "test": "vitest run",
     "test:watch": "vitest",
     "cargo:test": "cargo test --manifest-path src-tauri/Cargo.toml",

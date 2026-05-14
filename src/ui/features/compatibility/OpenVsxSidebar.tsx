@@ -227,7 +227,7 @@ export function OpenVsxSidebar({ projectRoot, width, onResize }: OpenVsxSidebarP
 
   return (
     <aside
-      className="relative flex h-full shrink-0 flex-col overflow-hidden border-r border-zinc-800 bg-[#181818]"
+      className="relative flex h-full shrink-0 flex-col overflow-hidden border-r border-zinc-800 bg-[#1f1f1f]"
       style={{ width: displayedWidth }}
     >
       <div className="flex h-10 shrink-0 items-end gap-1 border-b border-zinc-800 px-2">
@@ -262,7 +262,7 @@ export function OpenVsxSidebar({ projectRoot, width, onResize }: OpenVsxSidebarP
 
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
         {normalizedSearchText.length < 2 ? (
-          <div className="rounded-md border border-zinc-800 bg-zinc-950 p-3 text-xs leading-5 text-zinc-500">
+          <div className="rounded-md border border-zinc-800 bg-[#242424] p-3 text-xs leading-5 text-zinc-500">
             Type at least two characters to search extensions by name, publisher,
             language, or framework.
           </div>
@@ -332,7 +332,7 @@ function ExtensionResultCard({
   onInstall: (extension: OpenVsxExtensionSummary) => void;
 }) {
   return (
-    <article className="rounded-md border border-transparent p-2 transition hover:border-zinc-800 hover:bg-zinc-900">
+    <article className="rounded-md border border-transparent p-2 transition hover:border-zinc-800 hover:bg-zinc-800/70">
       <button
         type="button"
         className="w-full text-left"
@@ -346,7 +346,7 @@ function ExtensionResultCard({
               alt=""
             />
           ) : (
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded bg-zinc-800 text-zinc-400">
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded bg-[#2a2a2a] text-zinc-400">
               <Package size={15} />
             </span>
           )}
@@ -434,7 +434,7 @@ function ExtensionDetailsOverlay({
   onClose: () => void;
 }) {
   return (
-    <div className="absolute inset-0 z-30 flex flex-col bg-[#181818]">
+    <div className="absolute inset-0 z-30 flex flex-col bg-[#1f1f1f]">
       <div className="flex h-10 shrink-0 items-center justify-between border-b border-zinc-800 px-3">
         <div className="min-w-0 text-xs font-medium text-zinc-200">
           Extension details
@@ -457,7 +457,7 @@ function ExtensionDetailsOverlay({
               alt=""
             />
           ) : (
-            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded bg-zinc-800 text-zinc-400">
+            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded bg-[#2a2a2a] text-zinc-400">
               <Package size={20} />
             </span>
           )}
@@ -518,7 +518,7 @@ function ExtensionDetailsOverlay({
 
         <div className="mt-4 space-y-2">
           {projectRoot ? (
-            <div className="flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-950 p-2 text-xs text-zinc-400">
+            <div className="flex items-center gap-2 rounded-md border border-zinc-800 bg-[#242424] p-2 text-xs text-zinc-400">
               <CheckCircle2 size={13} className="shrink-0 text-emerald-300" />
               Project selected for compatibility work.
             </div>
@@ -609,7 +609,7 @@ function SortDropdown({
   onChangeSortMode: (sortMode: OpenVsxSortMode) => void;
 }) {
   return (
-    <div className="absolute right-0 top-9 z-40 w-44 rounded-md border border-zinc-800 bg-[#202020] p-1 shadow-2xl">
+    <div className="absolute right-0 top-9 z-40 w-44 rounded-md border border-zinc-800 bg-[#242424] p-1 shadow-2xl">
       {[
         ["downloads", "Download count"],
         ["rating", "Rating"],
@@ -643,7 +643,7 @@ function Metric({
   value: string;
 }) {
   return (
-    <div className="rounded-md border border-zinc-800 bg-zinc-950 p-2">
+    <div className="rounded-md border border-zinc-800 bg-[#242424] p-2">
       <div className="mb-1 flex items-center gap-1.5 text-[11px] uppercase tracking-wide text-zinc-500">
         {icon}
         {label}

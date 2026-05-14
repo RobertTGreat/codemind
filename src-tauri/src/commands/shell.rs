@@ -24,6 +24,7 @@ static ACTIVE_SHELL_RUNS: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new(
 pub enum ShellKind {
     CommandPrompt,
     PowerShell,
+    GitBash,
     Sh,
     Bash,
     Zsh,
@@ -489,6 +490,18 @@ fn create_shell_command(
                 }
                 shell_command
             }
+            ShellKind::GitBash => {
+                let mut shell_command = Command::new(resolve_git_bash_executable());
+                shell_command
+                    .args(["-lc", command])
+                    .current_dir(working_directory);
+                #[cfg(target_os = "windows")]
+                {
+                    use std::os::windows::process::CommandExt;
+                    shell_command.creation_flags(CREATE_NO_WINDOW);
+                }
+                shell_command
+            }
             ShellKind::PowerShell | ShellKind::Sh | ShellKind::Bash | ShellKind::Zsh => {
                 let mut shell_command = Command::new("powershell");
                 shell_command
@@ -504,7 +517,7 @@ fn create_shell_command(
         }
     } else {
         let executable = match shell_kind {
-            ShellKind::Bash => "bash",
+            ShellKind::Bash | ShellKind::GitBash => "bash",
             ShellKind::Zsh => "zsh",
             ShellKind::CommandPrompt | ShellKind::PowerShell | ShellKind::Sh => "sh",
         };
@@ -515,6 +528,23 @@ fn create_shell_command(
             .current_dir(working_directory);
         shell_command
     }
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_git_bash_executable() -> PathBuf {
+    ["PROGRAMFILES", "PROGRAMFILES(X86)"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .map(PathBuf::from)
+        .map(|root| root.join("Git").join("bin").join("bash.exe"))
+        .find(|candidate_path| candidate_path.is_file())
+        .or_else(|| find_commands_on_path("bash").into_iter().next())
+        .unwrap_or_else(|| PathBuf::from("bash"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn resolve_git_bash_executable() -> PathBuf {
+    PathBuf::from("bash")
 }
 
 fn configure_streaming_shell_process(command: &mut Command) {

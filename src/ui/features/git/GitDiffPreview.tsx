@@ -18,7 +18,7 @@ export function GitDiffPreview({
   const fileDiff = useGitFileDiff(projectRoot, path, staged);
 
   return (
-    <div className="absolute inset-0 z-50 flex flex-col bg-[#181818]">
+    <div className="absolute inset-0 z-50 flex flex-col bg-[#1f1f1f]">
       <div className="flex h-10 shrink-0 items-center justify-between border-b border-zinc-800 px-3">
         <div className="min-w-0">
           <p className="truncate text-xs font-medium text-zinc-100">{path}</p>
@@ -49,7 +49,7 @@ export function GitDiffPreview({
         ) : null}
 
         {fileDiff.data ? (
-          <pre className="whitespace-pre-wrap rounded bg-zinc-950 p-3 font-mono text-xs leading-5 text-zinc-300">
+          <pre className="whitespace-pre-wrap rounded bg-[#242424] p-3 font-mono text-xs leading-5 text-zinc-300">
             {fileDiff.data.diffText || "No textual diff available."}
           </pre>
         ) : null}

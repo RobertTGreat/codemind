@@ -56,6 +56,7 @@ interface ChatPanelProps {
   session: Session | null;
   onSelectDiff: (proposal: DiffProposal | null) => void;
   selectedDiffId: string | null;
+  onOpenChangedFile: (relativePath: string) => void;
 }
 
 const agentWorkModes = ["Build", "Plan"] as const;
@@ -112,7 +113,17 @@ interface ToastMessage {
   description?: string;
 }
 
-export function ChatPanel({ session, onSelectDiff, selectedDiffId }: ChatPanelProps) {
+interface ChangedFileReference {
+  path: string;
+  label: string;
+}
+
+export function ChatPanel({
+  session,
+  onSelectDiff,
+  selectedDiffId,
+  onOpenChangedFile,
+}: ChatPanelProps) {
   const [draftMessage, setDraftMessage] = useState("");
   const [composerError, setComposerError] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState("gpt-5.5");
@@ -663,7 +674,9 @@ export function ChatPanel({ session, onSelectDiff, selectedDiffId }: ChatPanelPr
           );
           const isMessageActive = activeIndicatorMessageId === message.id;
           const responseRunStats = responseRunStatsByMessageId[message.id];
-          const changedFiles = isMessageActive ? [] : extractChangedFileNames(message);
+          const changedFiles = isMessageActive
+            ? []
+            : extractChangedFileReferences(message, session?.projectRoot ?? null);
           const shouldRenderAssistantMessage =
             message.role !== "assistant" ||
             message.content.length > 0 ||
@@ -701,6 +714,7 @@ export function ChatPanel({ session, onSelectDiff, selectedDiffId }: ChatPanelPr
               <ResponseCompletionActions
                 changedFiles={changedFiles}
                 canResume={isStoppedAssistantMessage(message, activityMessages)}
+                onOpenChangedFile={onOpenChangedFile}
                 onResume={handleResumeResponse}
               />
             );
@@ -1276,22 +1290,22 @@ function AgentActivityRow({
   const ExpandIcon = isExpanded ? ChevronDown : ChevronRight;
 
   return (
-    <article className="mb-1.5 min-w-0">
+    <article className="mt-1 min-w-0">
       <button
         type="button"
-        className="grid w-full grid-cols-[minmax(0,1fr)_14px] items-center gap-1.5 rounded border border-zinc-800 bg-[#202020] px-2 py-1 text-left text-xs text-zinc-400 hover:border-zinc-700 hover:bg-[#242424] hover:text-zinc-200"
+        className="grid w-full grid-cols-[minmax(0,1fr)_14px] items-center gap-1.5 rounded px-1 py-0.5 text-left text-[11px] text-zinc-500 hover:bg-zinc-800/50 hover:text-zinc-300"
         onClick={onToggle}
       >
         <span className="flex min-w-0 items-center gap-1.5">
           <ActivityIcon activityKind={activityMessage.kind} />
-          <span className="truncate font-medium text-zinc-300">
+          <span className="truncate">
             {activityDetails.title}
           </span>
         </span>
         <ExpandIcon size={12} className="text-zinc-500" />
       </button>
       {isExpanded ? (
-        <pre className="mt-1 max-h-40 overflow-auto rounded border border-zinc-800 bg-zinc-950 p-2 text-[11px] leading-4 text-zinc-300">
+        <pre className="mt-1 max-h-40 overflow-auto rounded border border-zinc-800 bg-[#242424] p-2 text-[11px] leading-4 text-zinc-300">
           <code>{activityDetails.fullText}</code>
         </pre>
       ) : null}
@@ -1329,41 +1343,54 @@ function TimelineFilters({
   activityMessages: ActivityEntry[];
   onSelectFilter: (timelineFilter: TimelineFilter) => void;
 }) {
-  const filterOptions: Array<{ value: TimelineFilter; label: string; count: number }> = [
-    { value: "all", label: "All", count: activityMessages.length },
+  const filterOptions: Array<{
+    value: TimelineFilter;
+    label: string;
+    count: number;
+    icon: ReactNode;
+  }> = [
+    { value: "all", label: "All", count: activityMessages.length, icon: <Box size={12} /> },
     {
       value: "thinking",
       label: "Thinking",
       count: activityMessages.filter((activityMessage) => activityMessage.kind === "thinking")
         .length,
+      icon: <Brain size={12} />,
     },
     {
       value: "tool",
       label: "Commands",
       count: activityMessages.filter((activityMessage) => activityMessage.kind === "tool").length,
+      icon: <Terminal size={12} />,
     },
     {
       value: "approval",
       label: "Approvals",
       count: activityMessages.filter((activityMessage) => activityMessage.kind === "approval")
         .length,
+      icon: <ClipboardList size={12} />,
     },
   ];
 
   return (
-    <div className="mb-1.5 flex flex-wrap gap-1">
+    <div className="mt-2 flex flex-wrap gap-1">
       {filterOptions.map((filterOption) => (
         <button
           key={filterOption.value}
           type="button"
-          className={`rounded border px-2 py-0.5 text-[11px] ${
+          className={`relative flex h-6 w-6 items-center justify-center rounded border text-[11px] ${
             selectedFilter === filterOption.value
-              ? "border-emerald-500/60 bg-emerald-500/10 text-emerald-200"
-              : "border-zinc-800 bg-[#202020] text-zinc-500 hover:border-zinc-700 hover:text-zinc-300"
+              ? "border-emerald-500/60 text-emerald-200"
+              : "border-zinc-800 text-zinc-500 hover:border-zinc-700 hover:text-zinc-300"
           }`}
+          title={`${filterOption.label}: ${filterOption.count}`}
+          aria-label={`${filterOption.label}: ${filterOption.count}`}
           onClick={() => onSelectFilter(filterOption.value)}
         >
-          {filterOption.label} {filterOption.count}
+          {filterOption.icon}
+          <span className="absolute -right-1 -top-1 min-w-3 rounded-full bg-[#242424] px-0.5 text-[9px] leading-3 text-zinc-400">
+            {filterOption.count}
+          </span>
         </button>
       ))}
     </div>
@@ -1385,10 +1412,12 @@ function ResponseProgressIndicator({ isStopping }: { isStopping: boolean }) {
 function ResponseCompletionActions({
   changedFiles,
   canResume,
+  onOpenChangedFile,
   onResume,
 }: {
-  changedFiles: string[];
+  changedFiles: ChangedFileReference[];
   canResume: boolean;
+  onOpenChangedFile: (relativePath: string) => void;
   onResume: () => void;
 }) {
   if (changedFiles.length === 0 && !canResume) {
@@ -1398,12 +1427,20 @@ function ResponseCompletionActions({
   return (
     <div className="mt-2 flex flex-wrap items-center gap-1.5">
       {changedFiles.length > 0 ? (
-        <span className="inline-flex max-w-full items-center gap-1.5 rounded border border-zinc-800 bg-[#202020] px-2 py-1 text-[11px] text-zinc-300">
-          <FileCode size={12} className="shrink-0 text-emerald-300" />
-          <span className="truncate">
-            Changed {changedFiles.length === 1 ? changedFiles[0] : `${changedFiles.length} files`}
-          </span>
-        </span>
+        <div className="flex max-w-full flex-wrap items-center gap-1">
+          {changedFiles.map((changedFile) => (
+            <button
+              key={changedFile.path}
+              type="button"
+              className="inline-flex max-w-full items-center gap-1.5 rounded border border-zinc-800 bg-[#202020] px-2 py-1 text-[11px] text-zinc-300 hover:border-zinc-700 hover:bg-[#242424] hover:text-zinc-100"
+              title={`Open ${changedFile.path} at its changed section`}
+              onClick={() => onOpenChangedFile(changedFile.path)}
+            >
+              <FileCode size={12} className="shrink-0 text-emerald-300" />
+              <span className="truncate">{changedFile.label}</span>
+            </button>
+          ))}
+        </div>
       ) : null}
       {canResume ? (
         <button
@@ -1453,10 +1490,10 @@ function ChatBubble({
             </span>
           ) : null}
         </div>
-        {activityContent}
         {message.content.length > 0 ? (
           <MarkdownMessage content={message.content} />
         ) : null}
+        {activityContent}
         {footerContent}
       </div>
     </article>
@@ -1810,24 +1847,61 @@ function isStoppedAssistantMessage(
   );
 }
 
-function extractChangedFileNames(message: ChatMessage): string[] {
+function extractChangedFileReferences(
+  message: ChatMessage,
+  projectRoot: string | null,
+): ChangedFileReference[] {
   if (message.role !== "assistant" || message.content.trim().length === 0) {
     return [];
   }
 
-  const changedFileNames = new Set<string>();
+  const changedFileByPath = new Map<string, ChangedFileReference>();
   const markdownFilePattern = /\[[^\]]+\]\(([^)]+\.(?:tsx?|jsx?|rs|md|json|toml|css|html|yml|yaml|py|go|java|cs|cpp|c|h|hpp|sql|txt))(?:[:#][^)]+)?\)/gi;
   const plainFilePattern = /(?:^|\s)([A-Za-z]:[\\/][^\s`"')]+?\.(?:tsx?|jsx?|rs|md|json|toml|css|html|yml|yaml|py|go|java|cs|cpp|c|h|hpp|sql|txt))(?:[:#]\d+)?/gi;
 
   for (const match of message.content.matchAll(markdownFilePattern)) {
-    changedFileNames.add(getFileNameFromPath(match[1]));
+    addChangedFileReference(changedFileByPath, match[1], projectRoot);
   }
 
   for (const match of message.content.matchAll(plainFilePattern)) {
-    changedFileNames.add(getFileNameFromPath(match[1]));
+    addChangedFileReference(changedFileByPath, match[1], projectRoot);
   }
 
-  return Array.from(changedFileNames).slice(0, 6);
+  return Array.from(changedFileByPath.values()).slice(0, 6);
+}
+
+function addChangedFileReference(
+  changedFileByPath: Map<string, ChangedFileReference>,
+  rawPath: string,
+  projectRoot: string | null,
+) {
+  const relativePath = getProjectRelativePath(rawPath, projectRoot);
+  if (!relativePath || changedFileByPath.has(relativePath)) {
+    return;
+  }
+
+  changedFileByPath.set(relativePath, {
+    path: relativePath,
+    label: getFileNameFromPath(relativePath),
+  });
+}
+
+function getProjectRelativePath(rawPath: string, projectRoot: string | null): string | null {
+  const normalizedPath = decodeURIComponent(rawPath)
+    .replace(/^file:\/+/i, "")
+    .replace(/\\/g, "/")
+    .replace(/^\/([A-Za-z]:\/)/, "$1");
+  const normalizedProjectRoot = projectRoot?.replace(/\\/g, "/").replace(/\/$/, "");
+
+  if (normalizedProjectRoot && normalizedPath.startsWith(`${normalizedProjectRoot}/`)) {
+    return normalizedPath.slice(normalizedProjectRoot.length + 1);
+  }
+
+  if (/^[A-Za-z]:\//.test(normalizedPath) || normalizedPath.startsWith("/")) {
+    return null;
+  }
+
+  return normalizedPath.replace(/^\.?\//, "");
 }
 
 function getFileNameFromPath(pathText: string): string {

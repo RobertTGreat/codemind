@@ -38,6 +38,11 @@ export function CodemindWorkspace() {
   const sessions = useSessions();
   const createSession = useCreateSession();
   const [selectedDiff, setSelectedDiff] = useState<DiffProposal | null>(null);
+  const [gitRevealRequest, setGitRevealRequest] = useState<{
+    path: string;
+    source: "working" | "staged";
+    requestId: number;
+  } | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isQuickOpenOpen, setIsQuickOpenOpen] = useState(false);
@@ -131,6 +136,16 @@ export function CodemindWorkspace() {
     setSelectedFilePath(relativePath);
   }
 
+  function handleOpenGitChange(relativePath: string, source: "working" | "staged") {
+    setSelectedDiff(null);
+    setSelectedFilePath(relativePath);
+    setGitRevealRequest({
+      path: relativePath,
+      source,
+      requestId: Date.now(),
+    });
+  }
+
   return (
     <main
       className="relative flex h-full w-full bg-[#121212] text-zinc-100"
@@ -152,6 +167,7 @@ export function CodemindWorkspace() {
           projectRoot={selectedSession?.projectRoot ?? null}
           width={gitWidth}
           onResize={setGitWidth}
+          onOpenChange={handleOpenGitChange}
         />
       ) : null}
       <div className="flex min-w-0 flex-1 flex-col">
@@ -177,6 +193,7 @@ export function CodemindWorkspace() {
                     projectRoot={selectedSession?.projectRoot ?? null}
                     selectedFilePath={selectedFilePath}
                     selectedDiff={selectedDiff}
+                    gitRevealRequest={gitRevealRequest}
                     fileChangeSummaryByPath={fileChangeSummaryByPath}
                     onSelectFile={handleSelectFile}
                     onClearSelectedDiff={() => setSelectedDiff(null)}
@@ -187,6 +204,9 @@ export function CodemindWorkspace() {
                     session={selectedSession}
                     selectedDiffId={selectedDiff?.id ?? null}
                     onSelectDiff={setSelectedDiff}
+                    onOpenChangedFile={(relativePath) =>
+                      handleOpenGitChange(relativePath, "working")
+                    }
                   />
                 ) : null}
               </PaneSlot>

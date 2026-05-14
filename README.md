@@ -80,3 +80,5 @@ pnpm check
 Codemind intentionally works with local files, shell commands, Git, extension downloads, and AI-generated diffs. The app validates project paths, keeps filesystem operations scoped to selected projects, requires approval for proposed edits unless configured otherwise, enables SQLite foreign keys, and uses targeted cache invalidation so UI state stays predictable.
 
 Test line.
+
+Test edit.

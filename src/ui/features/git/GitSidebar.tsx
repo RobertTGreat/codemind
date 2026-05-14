@@ -40,6 +40,7 @@ interface GitSidebarProps {
   projectRoot: string | null;
   width: number;
   onResize: (width: number) => void;
+  onOpenChange: (relativePath: string, source: "working" | "staged") => void;
 }
 
 type OperationStatus = {
@@ -53,7 +54,7 @@ interface SelectedGitDiffPreview {
   staged: boolean;
 }
 
-export function GitSidebar({ projectRoot, width, onResize }: GitSidebarProps) {
+export function GitSidebar({ projectRoot, width, onResize, onOpenChange }: GitSidebarProps) {
   const gitStatus = useGitStatus(projectRoot);
   const initRepository = useGitInitRepository(projectRoot);
   const setRemote = useGitSetRemote(projectRoot);
@@ -161,7 +162,7 @@ export function GitSidebar({ projectRoot, width, onResize }: GitSidebarProps) {
 
   return (
     <aside
-      className="relative flex h-full shrink-0 flex-col overflow-hidden border-r border-zinc-800 bg-[#181818]"
+      className="relative flex h-full shrink-0 flex-col overflow-hidden border-r border-zinc-800 bg-[#1f1f1f]"
       style={{ width: displayedWidth }}
     >
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-zinc-800 px-3">
@@ -315,6 +316,7 @@ export function GitSidebar({ projectRoot, width, onResize }: GitSidebarProps) {
               {(changedFile) => (
                 <GitFileRow
                   changedFile={changedFile}
+                  onOpenChange={() => onOpenChange(changedFile.path, "staged")}
                   onPreviewDiff={() =>
                     setSelectedDiffPreview({ path: changedFile.path, staged: true })
                   }
@@ -368,6 +370,7 @@ export function GitSidebar({ projectRoot, width, onResize }: GitSidebarProps) {
               {(changedFile) => (
                 <GitFileRow
                   changedFile={changedFile}
+                  onOpenChange={() => onOpenChange(changedFile.path, "working")}
                   onPreviewDiff={() =>
                     setSelectedDiffPreview({ path: changedFile.path, staged: false })
                   }
@@ -402,6 +405,7 @@ export function GitSidebar({ projectRoot, width, onResize }: GitSidebarProps) {
               {(changedFile) => (
                 <GitFileRow
                   changedFile={changedFile}
+                  onOpenChange={() => onOpenChange(changedFile.path, "working")}
                   onPreviewDiff={() =>
                     setSelectedDiffPreview({ path: changedFile.path, staged: false })
                   }
@@ -429,7 +433,7 @@ export function GitSidebar({ projectRoot, width, onResize }: GitSidebarProps) {
             </GitFileSection>
 
             {!hasChanges ? (
-              <div className="rounded-md border border-zinc-800 bg-zinc-950 p-3 text-xs text-zinc-500">
+                <div className="rounded-md border border-zinc-800 bg-[#242424] p-3 text-xs text-zinc-500">
                 Working tree clean.
               </div>
             ) : null}
@@ -461,7 +465,7 @@ function RepositorySummary({
   repositoryStatus: GitRepositoryStatus;
 }) {
   return (
-    <section className="space-y-2 rounded-md border border-zinc-800 bg-zinc-950 p-2.5">
+    <section className="space-y-2 rounded-md border border-zinc-800 bg-[#242424] p-2.5">
       <div className="flex min-w-0 items-center gap-2">
         <GitBranch size={13} className="shrink-0 text-emerald-300" />
         <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-100">
@@ -524,7 +528,7 @@ function RemoteSettings({
       </label>
       <div className="flex gap-1.5">
         <input
-          className="min-w-0 flex-1 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-zinc-600"
+          className="min-w-0 flex-1 rounded-md border border-zinc-800 bg-[#242424] px-2 py-1.5 text-xs text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-zinc-600"
           placeholder="https://github.com/owner/repo.git"
           value={remoteUrlInput}
           onChange={(event) => onChangeRemoteUrl(event.target.value)}
@@ -559,7 +563,7 @@ function CommitPanel({
   return (
     <section className="space-y-2">
       <textarea
-        className="min-h-20 w-full resize-none rounded-md border border-zinc-800 bg-zinc-950 px-2.5 py-2 text-xs leading-5 text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-zinc-600"
+        className="min-h-20 w-full resize-none rounded-md border border-zinc-800 bg-[#242424] px-2.5 py-2 text-xs leading-5 text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-zinc-600"
         placeholder="Commit message"
         value={commitMessage}
         onChange={(event) => onChangeCommitMessage(event.target.value)}
@@ -595,7 +599,7 @@ function OperationNotice({ operationStatus }: { operationStatus: OperationStatus
           <summary className="cursor-pointer text-[11px] text-zinc-300">
             Git output
           </summary>
-          <pre className="mt-1 max-h-44 overflow-auto whitespace-pre-wrap rounded bg-black/30 p-2 text-[11px] leading-4 text-zinc-200">
+          <pre className="mt-1 max-h-44 overflow-auto whitespace-pre-wrap rounded bg-[#242424] p-2 text-[11px] leading-4 text-zinc-200">
             {operationStatus.output}
           </pre>
         </details>
@@ -618,7 +622,7 @@ function Notice({
       className={`flex gap-2 rounded-md border p-2 text-xs leading-5 ${
         kind === "error"
           ? "border-red-500/20 bg-red-500/10 text-red-100"
-          : "border-zinc-800 bg-zinc-950 text-zinc-400"
+          : "border-zinc-800 bg-[#242424] text-zinc-400"
       }`}
     >
       <AlertCircle size={14} className="mt-0.5 shrink-0" />
@@ -640,7 +644,7 @@ function EmptyState({
   body: string;
 }) {
   return (
-    <div className="rounded-md border border-zinc-800 bg-zinc-950 p-3 text-xs leading-5 text-zinc-500">
+    <div className="rounded-md border border-zinc-800 bg-[#242424] p-3 text-xs leading-5 text-zinc-500">
       <div className="mb-2 flex items-center gap-2 text-zinc-200">
         {icon}
         <span className="font-medium">{title}</span>
@@ -682,10 +686,12 @@ function GitFileSection({
 
 function GitFileRow({
   changedFile,
+  onOpenChange,
   onPreviewDiff,
   actions,
 }: {
   changedFile: GitChangedFile;
+  onOpenChange: () => void;
   onPreviewDiff: () => void;
   actions: ReactNode;
 }) {
@@ -694,11 +700,16 @@ function GitFileRow({
     : changedFile.path;
 
   return (
-    <div className="group flex min-h-8 items-center gap-2 rounded px-1.5 py-1 hover:bg-zinc-900">
+    <div className="group flex min-h-8 items-center gap-2 rounded px-1.5 py-1 hover:bg-zinc-800/70">
       <ChangeTypeBadge changedFile={changedFile} />
-      <div className="min-w-0 flex-1" title={pathLabel}>
+      <button
+        type="button"
+        className="min-w-0 flex-1 text-left"
+        title={pathLabel}
+        onClick={onOpenChange}
+      >
         <p className="truncate text-xs text-zinc-200">{pathLabel}</p>
-      </div>
+      </button>
       <div className="flex shrink-0 items-center gap-0.5 opacity-100 sm:opacity-0 sm:group-hover:opacity-100">
         <IconAction
           title="Preview diff"

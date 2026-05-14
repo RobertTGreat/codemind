@@ -1,6 +1,6 @@
 import Editor, { DiffEditor, type BeforeMount, type OnMount } from "@monaco-editor/react";
 import { useQueryClient } from "@tanstack/react-query";
-import { FileCode, GitCompare, Save, X } from "lucide-react";
+import { AlertCircle, FileCode, GitCompare, LoaderCircle, Save, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { DiffProposal } from "../../../domain/models/approval";
 import type { FileChangeSummary } from "../../../domain/logic/diffAnnotations";
@@ -15,7 +15,6 @@ import {
   useSaveProjectFile,
 } from "../../../application/use-cases/sessionQueries";
 import { tauriCodemindRepository } from "../../../infrastructure/tauri/codemindRepository";
-import { Badge } from "../../components/badge/Badge";
 import { Button } from "../../components/button/Button";
 import { Panel } from "../../components/panel/Panel";
 import { useWorkspaceStore } from "../../../stores/workspaceStore";
@@ -30,6 +29,11 @@ interface CodeViewerProps {
   projectRoot: string | null;
   selectedFilePath: string | null;
   selectedDiff: DiffProposal | null;
+  gitRevealRequest: {
+    path: string;
+    source: "working" | "staged";
+    requestId: number;
+  } | null;
   fileChangeSummaryByPath: Record<string, FileChangeSummary>;
   onSelectFile: (relativePath: string) => void;
   onClearSelectedDiff: () => void;
@@ -41,14 +45,15 @@ export function CodeViewer({
   projectRoot,
   selectedFilePath,
   selectedDiff,
+  gitRevealRequest,
   fileChangeSummaryByPath,
   onSelectFile,
   onClearSelectedDiff,
 }: CodeViewerProps) {
   const [draftContentByPath, setDraftContentByPath] = useState<Record<string, string>>({});
   const [savedContentByPath, setSavedContentByPath] = useState<Record<string, string>>({});
-  const [isGitDiffMode, setIsGitDiffMode] = useState(false);
   const [gitDiffSource, setGitDiffSource] = useState<"working" | "staged">("working");
+  const [editorMountVersion, setEditorMountVersion] = useState(0);
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
   const monacoRef = useRef<Parameters<OnMount>[1] | null>(null);
   const decorationIdsRef = useRef<string[]>([]);
@@ -64,7 +69,6 @@ export function CodeViewer({
   const selectedFileChangeSummary = selectedFilePath
     ? fileChangeSummaryByPath[selectedFilePath]
     : undefined;
-  const editorDiffProposal = selectedDiff ?? selectedFileChangeSummary?.proposal ?? null;
   const selectedGitChangedFile = useMemo(
     () => findGitChangedFile(gitStatus.data?.changedFiles ?? [], selectedFilePath),
     [gitStatus.data?.changedFiles, selectedFilePath],
@@ -74,10 +78,6 @@ export function CodeViewer({
       ? draftContentByPath[selectedFilePath] ?? projectFile.data?.content ?? ""
       : "";
   const dirtyFilePaths = openFileTabs.filter((filePath) => isFileDirty(filePath));
-  const lineChangeAnnotations = useMemo(
-    () => createLineChangeAnnotations(editorDiffProposal),
-    [editorDiffProposal],
-  );
   const hasUnsavedEditorChanges =
     Boolean(selectedFilePath) && isFileDirty(selectedFilePath);
   const hasSelectedWorkingTreeChanges =
@@ -91,7 +91,37 @@ export function CodeViewer({
     projectRoot,
     selectedFilePath,
     isViewingStagedGitDiff,
-    isGitDiffMode && canShowGitDiff,
+    canShowGitDiff,
+  );
+  const gitDiffProposal = useMemo<DiffProposal | null>(() => {
+    if (!selectedFilePath || !gitFileVersion.data) {
+      return null;
+    }
+
+    return {
+      id: `git:${selectedFilePath}:${gitDiffSource}`,
+      sessionId: "",
+      relativePath: selectedFilePath,
+      originalContent: gitFileVersion.data.originalContent,
+      proposedContent: isViewingStagedGitDiff
+        ? gitFileVersion.data.modifiedContent
+        : draftContent,
+      diffText: "",
+      status: "pending",
+      createdAt: "",
+    };
+  }, [
+    draftContent,
+    gitDiffSource,
+    gitFileVersion.data,
+    isViewingStagedGitDiff,
+    selectedFilePath,
+  ]);
+  const editorDiffProposal =
+    selectedDiff ?? selectedFileChangeSummary?.proposal ?? gitDiffProposal;
+  const lineChangeAnnotations = useMemo(
+    () => createLineChangeAnnotations(editorDiffProposal),
+    [editorDiffProposal],
   );
 
   useEffect(() => {
@@ -99,7 +129,6 @@ export function CodeViewer({
   }, [savedContentByPath]);
 
   useEffect(() => {
-    setIsGitDiffMode(false);
     setGitDiffSource(
       selectedGitChangedFile?.isStaged && !selectedGitChangedFile.isUnstaged
         ? "staged"
@@ -110,6 +139,12 @@ export function CodeViewer({
     selectedGitChangedFile?.isStaged,
     selectedGitChangedFile?.isUnstaged,
   ]);
+
+  useEffect(() => {
+    if (gitRevealRequest?.path === selectedFilePath) {
+      setGitDiffSource(gitRevealRequest.source);
+    }
+  }, [gitRevealRequest?.path, gitRevealRequest?.requestId, gitRevealRequest?.source, selectedFilePath]);
 
   useEffect(() => {
     if (!selectedFilePath || !projectFile.data) {
@@ -195,11 +230,36 @@ export function CodeViewer({
         },
       })),
     );
-  }, [lineChangeAnnotations, selectedDiff]);
+  }, [editorMountVersion, lineChangeAnnotations, selectedDiff, selectedFilePath]);
+
+  useEffect(() => {
+    if (
+      !editorRef.current ||
+      !gitRevealRequest ||
+      gitRevealRequest.path !== selectedFilePath ||
+      lineChangeAnnotations.length === 0
+    ) {
+      return;
+    }
+
+    const firstChangedLine = lineChangeAnnotations[0];
+    editorRef.current.revealLineInCenter(firstChangedLine.lineNumber);
+    editorRef.current.setPosition({
+      lineNumber: firstChangedLine.lineNumber,
+      column: 1,
+    });
+    editorRef.current.focus();
+  }, [
+    gitRevealRequest?.path,
+    gitRevealRequest?.requestId,
+    lineChangeAnnotations,
+    selectedFilePath,
+  ]);
 
   const handleEditorMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
     monacoRef.current = monaco;
+    setEditorMountVersion((currentVersion) => currentVersion + 1);
 
     const editorModel = editor.getModel();
     if (editorModel) {
@@ -363,8 +423,8 @@ export function CodeViewer({
 
   return (
     <Panel className="flex h-full min-w-0 flex-1 flex-col bg-[#121212]">
-      <div className="flex h-10 shrink-0 items-end justify-between border-b border-zinc-800 bg-[#1a1a1a] px-2">
-        <div className="flex min-w-0 items-end">
+      <div className="flex h-10 shrink-0 items-end justify-between gap-2 border-b border-zinc-800 bg-[#1a1a1a] px-2">
+        <div className="flex min-w-0 flex-1 items-end overflow-hidden">
         {openFileTabs.length === 0 ? (
           <div className="flex h-9 items-center px-3 text-xs text-zinc-500">No open tabs</div>
         ) : null}
@@ -409,20 +469,45 @@ export function CodeViewer({
           </div>
         ))}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex h-9 shrink-0 items-center gap-1 pb-1">
           {canShowGitDiff ? (
             <>
-              <Badge>{selectedGitChangedFile?.changeType ?? "Git change"}</Badge>
-              {isGitDiffMode && hasSelectedWorkingTreeChanges && hasSelectedStagedChanges ? (
-                <div className="flex rounded border border-zinc-800 bg-zinc-950 p-0.5">
+              <span
+                className="flex h-7 w-7 items-center justify-center rounded border border-zinc-800 text-zinc-400"
+                title={selectedGitChangedFile?.changeType ?? "Git change"}
+                aria-label={selectedGitChangedFile?.changeType ?? "Git change"}
+              >
+                <GitCompare size={13} />
+              </span>
+              {gitFileVersion.isLoading ? (
+                <span
+                  className="flex h-7 w-7 items-center justify-center rounded border border-zinc-800 text-sky-300"
+                  title="Loading Git diff"
+                  aria-label="Loading Git diff"
+                >
+                  <LoaderCircle size={13} className="animate-spin" />
+                </span>
+              ) : null}
+              {gitFileVersion.error ? (
+                <span
+                  className="flex h-7 w-7 items-center justify-center rounded border border-red-500/30 text-red-300"
+                  title="Git diff unavailable"
+                  aria-label="Git diff unavailable"
+                >
+                  <AlertCircle size={13} />
+                </span>
+              ) : null}
+              {hasSelectedWorkingTreeChanges && hasSelectedStagedChanges ? (
+                <div className="flex h-7 rounded border border-zinc-800 bg-[#202020] p-0.5">
                   <button
                     type="button"
                     className={cn(
-                      "rounded px-2 py-1 text-[11px]",
+                      "rounded px-1.5 text-[10px]",
                       gitDiffSource === "working"
-                        ? "bg-zinc-800 text-zinc-100"
+                        ? "bg-zinc-700 text-zinc-100"
                         : "text-zinc-500 hover:text-zinc-200",
                     )}
+                    title="Show working tree changes"
                     onClick={() => setGitDiffSource("working")}
                   >
                     Working
@@ -430,30 +515,28 @@ export function CodeViewer({
                   <button
                     type="button"
                     className={cn(
-                      "rounded px-2 py-1 text-[11px]",
+                      "rounded px-1.5 text-[10px]",
                       gitDiffSource === "staged"
-                        ? "bg-zinc-800 text-zinc-100"
+                        ? "bg-zinc-700 text-zinc-100"
                         : "text-zinc-500 hover:text-zinc-200",
                     )}
+                    title="Show staged changes"
                     onClick={() => setGitDiffSource("staged")}
                   >
                     Staged
                   </button>
                 </div>
               ) : null}
-              <Button
-                className="h-8 w-8 px-0"
-                variant={isGitDiffMode ? "primary" : "secondary"}
-                icon={<GitCompare size={14} />}
-                onClick={() => setIsGitDiffMode((isEnabled) => !isEnabled)}
-                title={isGitDiffMode ? "Show editor" : "Show Git diff"}
-              />
             </>
           ) : null}
           {editorDiffProposal ? (
-            <Badge>
-              {editorDiffProposal.originalContent.length === 0 ? "New file" : "Pending diff"}
-            </Badge>
+            <span
+              className="flex h-7 w-7 items-center justify-center rounded border border-emerald-500/30 text-emerald-300"
+              title={editorDiffProposal.originalContent.length === 0 ? "New file" : "Pending diff"}
+              aria-label={editorDiffProposal.originalContent.length === 0 ? "New file" : "Pending diff"}
+            >
+              <FileCode size={13} />
+            </span>
           ) : null}
           {!selectedDiff && selectedFilePath ? (
             <Button
@@ -491,30 +574,6 @@ export function CodeViewer({
             beforeMount={configureEditorLanguageDefaults}
             options={{ readOnly: true, renderSideBySide: true }}
           />
-        ) : isGitDiffMode && canShowGitDiff && selectedFilePath ? (
-          gitFileVersion.isLoading ? (
-            <div className="p-4 text-sm text-zinc-500">Loading Git diff...</div>
-          ) : gitFileVersion.error ? (
-            <div className="p-4 text-sm text-red-200">
-              {gitFileVersion.error instanceof Error
-                ? gitFileVersion.error.message
-                : String(gitFileVersion.error)}
-            </div>
-          ) : (
-            <DiffEditor
-              height="100%"
-              language={language}
-              original={gitFileVersion.data?.originalContent ?? ""}
-              modified={
-                isViewingStagedGitDiff
-                  ? (gitFileVersion.data?.modifiedContent ?? "")
-                  : draftContent
-              }
-              theme="vs-dark"
-              beforeMount={configureEditorLanguageDefaults}
-              options={{ readOnly: true, renderSideBySide: true }}
-            />
-          )
         ) : selectedFilePath ? (
           <Editor
             height="100%"
