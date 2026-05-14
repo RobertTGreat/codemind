@@ -4,8 +4,8 @@ import type { FileTreeNode } from "../../../domain/models/project";
 import type { FileChangeSummary } from "../../../domain/logic/diffAnnotations";
 import {
   useProjectDirectory,
-  useProjectSearch,
   useProjectTree,
+  useQuickOpenResults,
 } from "../../../application/use-cases/sessionQueries";
 import { useWorkspaceStore } from "../../../stores/workspaceStore";
 import { Panel } from "../../components/panel/Panel";
@@ -25,7 +25,7 @@ export function FileExplorer({
   const [filterText, setFilterText] = useState("");
   const projectTree = useProjectTree(projectRoot);
   const selectedFilePath = useWorkspaceStore((store) => store.selectedFilePath);
-  const projectSearch = useProjectSearch(projectRoot, filterText);
+  const quickOpenResults = useQuickOpenResults(projectRoot, filterText);
   const visibleNodes = useMemo(
     () => filterTree(projectTree.data, filterText),
     [projectTree.data, filterText],
@@ -54,10 +54,10 @@ export function FileExplorer({
         ) : null}
         {isSearching ? (
           <div className="space-y-1">
-            {projectSearch.isFetching && !projectSearch.data ? (
-              <p className="p-3 text-sm text-zinc-500">Searching...</p>
+            {quickOpenResults.isFetching && quickOpenResults.data.length === 0 ? (
+              <p className="p-3 text-sm text-zinc-500">Indexing files...</p>
             ) : null}
-            {projectSearch.data?.map((searchResult) => (
+            {quickOpenResults.data.map((searchResult) => (
               <SearchResultRow
                 key={searchResult.relativePath}
                 searchResult={searchResult}

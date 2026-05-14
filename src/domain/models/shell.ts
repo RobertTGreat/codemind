@@ -25,4 +25,4 @@ export interface ResolvedShellDirectory {
   cwd: string;
 }
 
-export type ShellKind = "commandPrompt" | "powerShell";
+export type ShellKind = "powerShell" | "commandPrompt" | "sh" | "bash" | "zsh";

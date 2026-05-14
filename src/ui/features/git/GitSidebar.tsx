@@ -3,6 +3,7 @@ import {
   Check,
   Cloud,
   Download,
+  FileText,
   GitBranch,
   Minus,
   Plus,
@@ -33,6 +34,7 @@ import {
 } from "../../../application/use-cases/sessionQueries";
 import { Badge } from "../../components/badge/Badge";
 import { Button } from "../../components/button/Button";
+import { GitDiffPreview } from "./GitDiffPreview";
 
 interface GitSidebarProps {
   projectRoot: string | null;
@@ -45,6 +47,11 @@ type OperationStatus = {
   message: string;
   output: string;
 };
+
+interface SelectedGitDiffPreview {
+  path: string;
+  staged: boolean;
+}
 
 export function GitSidebar({ projectRoot, width, onResize }: GitSidebarProps) {
   const gitStatus = useGitStatus(projectRoot);
@@ -60,6 +67,8 @@ export function GitSidebar({ projectRoot, width, onResize }: GitSidebarProps) {
   const [remoteUrlInput, setRemoteUrlInput] = useState("");
   const [commitMessage, setCommitMessage] = useState("");
   const [operationStatus, setOperationStatus] = useState<OperationStatus | null>(null);
+  const [selectedDiffPreview, setSelectedDiffPreview] =
+    useState<SelectedGitDiffPreview | null>(null);
   const [previewWidth, setPreviewWidth] = useState<number | null>(null);
   const repositoryStatus = gitStatus.data;
   const displayedWidth = previewWidth ?? width;
@@ -67,6 +76,10 @@ export function GitSidebar({ projectRoot, width, onResize }: GitSidebarProps) {
   useEffect(() => {
     setRemoteUrlInput(repositoryStatus?.remoteUrl ?? "");
   }, [projectRoot, repositoryStatus?.remoteUrl]);
+
+  useEffect(() => {
+    setSelectedDiffPreview(null);
+  }, [projectRoot]);
 
   const stagedFiles = useMemo(
     () => repositoryStatus?.changedFiles.filter((changedFile) => changedFile.isStaged) ?? [],
@@ -302,6 +315,9 @@ export function GitSidebar({ projectRoot, width, onResize }: GitSidebarProps) {
               {(changedFile) => (
                 <GitFileRow
                   changedFile={changedFile}
+                  onPreviewDiff={() =>
+                    setSelectedDiffPreview({ path: changedFile.path, staged: true })
+                  }
                   actions={
                     <>
                       <IconAction
@@ -352,6 +368,9 @@ export function GitSidebar({ projectRoot, width, onResize }: GitSidebarProps) {
               {(changedFile) => (
                 <GitFileRow
                   changedFile={changedFile}
+                  onPreviewDiff={() =>
+                    setSelectedDiffPreview({ path: changedFile.path, staged: false })
+                  }
                   actions={
                     <>
                       <IconAction
@@ -383,6 +402,9 @@ export function GitSidebar({ projectRoot, width, onResize }: GitSidebarProps) {
               {(changedFile) => (
                 <GitFileRow
                   changedFile={changedFile}
+                  onPreviewDiff={() =>
+                    setSelectedDiffPreview({ path: changedFile.path, staged: false })
+                  }
                   actions={
                     <>
                       <IconAction
@@ -414,6 +436,15 @@ export function GitSidebar({ projectRoot, width, onResize }: GitSidebarProps) {
           </div>
         ) : null}
       </div>
+
+      {selectedDiffPreview ? (
+        <GitDiffPreview
+          projectRoot={projectRoot}
+          path={selectedDiffPreview.path}
+          staged={selectedDiffPreview.staged}
+          onClose={() => setSelectedDiffPreview(null)}
+        />
+      ) : null}
 
       <SidebarResizeHandle
         initialWidth={width}
@@ -651,9 +682,11 @@ function GitFileSection({
 
 function GitFileRow({
   changedFile,
+  onPreviewDiff,
   actions,
 }: {
   changedFile: GitChangedFile;
+  onPreviewDiff: () => void;
   actions: ReactNode;
 }) {
   const pathLabel = changedFile.originalPath
@@ -667,6 +700,11 @@ function GitFileRow({
         <p className="truncate text-xs text-zinc-200">{pathLabel}</p>
       </div>
       <div className="flex shrink-0 items-center gap-0.5 opacity-100 sm:opacity-0 sm:group-hover:opacity-100">
+        <IconAction
+          title="Preview diff"
+          icon={<FileText size={12} />}
+          onClick={onPreviewDiff}
+        />
         {actions}
       </div>
     </div>

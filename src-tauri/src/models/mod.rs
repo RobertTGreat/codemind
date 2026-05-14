@@ -24,6 +24,20 @@ pub struct Message {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AgentActivity {
+    pub id: String,
+    pub session_id: String,
+    pub message_id: String,
+    pub message: String,
+    pub kind: String,
+    pub detail: Option<String>,
+    pub output: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum MessageRole {
     User,
     Assistant,
@@ -69,11 +83,21 @@ pub struct ProjectFile {
     pub absolute_path: String,
     pub content: String,
     pub language: String,
+    pub version: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectSearchResult {
+    pub name: String,
+    pub relative_path: String,
+    pub parent_path: String,
+    pub is_directory: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectIndexEntry {
     pub name: String,
     pub relative_path: String,
     pub parent_path: String,

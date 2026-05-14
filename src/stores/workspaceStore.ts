@@ -211,6 +211,9 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
     {
       name: "codemind-workspace",
       partialize: (state) => ({
+        selectedSessionId: state.selectedSessionId,
+        selectedFilePath: state.selectedFilePath,
+        openFileTabs: state.openFileTabs,
         paneOrder: state.paneOrder,
         paneSizes: state.paneSizes,
         visibleSections: state.visibleSections,

@@ -1,5 +1,5 @@
 use crate::{
-    models::{Message, MessageRole},
+    models::{AgentActivity, Message, MessageRole},
     services::agents,
     AppState,
 };
@@ -15,6 +15,35 @@ pub fn list_messages(
         .lock()
         .map_err(|_| "database lock failed".to_string())?
         .list_messages(session_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn list_messages_page(
+    state: State<'_, AppState>,
+    session_id: String,
+    before_created_at: Option<String>,
+    limit: i64,
+) -> Result<Vec<Message>, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "database lock failed".to_string())?
+        .list_messages_page(session_id, before_created_at, limit)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn list_agent_activities(
+    state: State<'_, AppState>,
+    session_id: String,
+    message_ids: Vec<String>,
+) -> Result<Vec<AgentActivity>, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "database lock failed".to_string())?
+        .list_agent_activities(session_id, message_ids)
         .map_err(|error| error.to_string())
 }
 

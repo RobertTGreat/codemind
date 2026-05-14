@@ -20,6 +20,18 @@ export interface ChatMessage {
   createdAt: string;
 }
 
+export interface AgentActivity {
+  id: string;
+  sessionId: string;
+  messageId: string;
+  message: string;
+  kind: string;
+  detail: string | null;
+  output: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface AgentTokenEvent {
   sessionId: string;
   messageId: string;

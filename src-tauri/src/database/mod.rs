@@ -1,12 +1,22 @@
-use crate::models::{DiffProposal, DiffStatus, Message, MessageRole, Session};
+use crate::models::{AgentActivity, DiffProposal, DiffStatus, Message, MessageRole, Session};
 use anyhow::{Context, Result};
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{params, params_from_iter, Connection};
 use std::fs;
 use uuid::Uuid;
 
 pub struct Database {
     connection: Connection,
+}
+
+pub struct AgentActivityUpsert {
+    pub activity_id: String,
+    pub session_id: String,
+    pub message_id: String,
+    pub activity_message: String,
+    pub activity_kind: String,
+    pub activity_detail: Option<String>,
+    pub activity_output: Option<String>,
 }
 
 impl Database {
@@ -54,6 +64,20 @@ impl Database {
                 FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS agent_activities (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                activity_message TEXT NOT NULL,
+                activity_kind TEXT NOT NULL,
+                activity_detail TEXT,
+                activity_output TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+                FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS diff_proposals (
                 id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
@@ -70,6 +94,8 @@ impl Database {
                 ON sessions(updated_at);
             CREATE INDEX IF NOT EXISTS idx_messages_session_created
                 ON messages(session_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_agent_activities_message_created
+                ON agent_activities(message_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_diff_proposals_session_status_created
                 ON diff_proposals(session_id, status, created_at);
             ",
@@ -199,19 +225,47 @@ impl Database {
         )?;
 
         let messages = statement
-            .query_map(params![session_id], |row| {
-                let role: String = row.get(2)?;
-                Ok(Message {
-                    id: row.get(0)?,
-                    session_id: row.get(1)?,
-                    role: MessageRole::from_database_value(&role),
-                    content: row.get(3)?,
-                    created_at: row.get(4)?,
-                })
-            })?
+            .query_map(params![session_id], map_message)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
         Ok(messages)
+    }
+
+    pub fn list_messages_page(
+        &self,
+        session_id: String,
+        before_created_at: Option<String>,
+        limit: i64,
+    ) -> Result<Vec<Message>> {
+        let limit = limit.clamp(1, 100);
+
+        let messages = if let Some(before_created_at) = before_created_at {
+            let mut statement = self.connection.prepare(
+                "SELECT id, session_id, role, content, created_at
+                 FROM messages
+                 WHERE session_id = ?1 AND created_at < ?2
+                 ORDER BY created_at DESC
+                 LIMIT ?3",
+            )?;
+            let page_messages = statement
+                .query_map(params![session_id, before_created_at, limit], map_message)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            page_messages
+        } else {
+            let mut statement = self.connection.prepare(
+                "SELECT id, session_id, role, content, created_at
+                 FROM messages
+                 WHERE session_id = ?1
+                 ORDER BY created_at DESC
+                 LIMIT ?2",
+            )?;
+            let page_messages = statement
+                .query_map(params![session_id, limit], map_message)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            page_messages
+        };
+
+        Ok(messages.into_iter().rev().collect())
     }
 
     pub fn create_message(
@@ -254,6 +308,63 @@ impl Database {
             params![content, message_id],
         )?;
         Ok(())
+    }
+
+    pub fn upsert_agent_activity(&self, activity: AgentActivityUpsert) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.connection.execute(
+            "INSERT INTO agent_activities
+             (id, session_id, message_id, activity_message, activity_kind, activity_detail, activity_output, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET
+                activity_message = excluded.activity_message,
+                activity_kind = excluded.activity_kind,
+                activity_detail = COALESCE(excluded.activity_detail, agent_activities.activity_detail),
+                activity_output = COALESCE(excluded.activity_output, agent_activities.activity_output),
+                updated_at = excluded.updated_at",
+            params![
+                activity.activity_id,
+                activity.session_id,
+                activity.message_id,
+                activity.activity_message,
+                activity.activity_kind,
+                activity.activity_detail,
+                activity.activity_output,
+                now,
+                now,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn list_agent_activities(
+        &self,
+        session_id: String,
+        message_ids: Vec<String>,
+    ) -> Result<Vec<AgentActivity>> {
+        if message_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = (0..message_ids.len())
+            .map(|index| format!("?{}", index + 2))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let query = format!(
+            "SELECT id, session_id, message_id, activity_message, activity_kind, activity_detail, activity_output, created_at, updated_at
+             FROM agent_activities
+             WHERE session_id = ?1 AND message_id IN ({placeholders})
+             ORDER BY created_at ASC"
+        );
+        let mut statement = self.connection.prepare(&query)?;
+        let query_parameters =
+            std::iter::once(session_id.as_str()).chain(message_ids.iter().map(String::as_str));
+        let activities = statement
+            .query_map(params_from_iter(query_parameters), map_agent_activity)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        Ok(activities)
     }
 
     pub fn create_diff_proposal(
@@ -364,6 +475,32 @@ impl Database {
     }
 }
 
+fn map_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
+    let role: String = row.get(2)?;
+
+    Ok(Message {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        role: MessageRole::from_database_value(&role),
+        content: row.get(3)?,
+        created_at: row.get(4)?,
+    })
+}
+
+fn map_agent_activity(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentActivity> {
+    Ok(AgentActivity {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        message_id: row.get(2)?,
+        message: row.get(3)?,
+        kind: row.get(4)?,
+        detail: row.get(5)?,
+        output: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+    })
+}
+
 fn map_diff_proposal(row: &rusqlite::Row<'_>) -> rusqlite::Result<DiffProposal> {
     let status: String = row.get(6)?;
     Ok(DiffProposal {
@@ -389,11 +526,7 @@ mod tests {
             .create_session("Cascade test".to_string(), "codex-cli".to_string())
             .expect("session is created");
         database
-            .create_message(
-                session.id.clone(),
-                MessageRole::User,
-                "hello".to_string(),
-            )
+            .create_message(session.id.clone(), MessageRole::User, "hello".to_string())
             .expect("message is created");
         database
             .create_diff_proposal(
@@ -420,5 +553,118 @@ mod tests {
 
         assert_eq!(message_count, 0);
         assert_eq!(diff_count, 0);
+    }
+
+    #[test]
+    fn list_agent_activities_returns_visible_message_activity() {
+        let database = Database::open_in_memory().expect("database opens");
+        let session = database
+            .create_session("Activity test".to_string(), "codex-cli".to_string())
+            .expect("session is created");
+        let message = database
+            .create_message(session.id.clone(), MessageRole::Assistant, String::new())
+            .expect("message is created");
+
+        database
+            .upsert_agent_activity(AgentActivityUpsert {
+                activity_id: "activity-1".to_string(),
+                session_id: session.id.clone(),
+                message_id: message.id.clone(),
+                activity_message: "Running command".to_string(),
+                activity_kind: "tool".to_string(),
+                activity_detail: Some("pnpm test".to_string()),
+                activity_output: Some("passed".to_string()),
+            })
+            .expect("activity is created");
+        database
+            .upsert_agent_activity(AgentActivityUpsert {
+                activity_id: "activity-1".to_string(),
+                session_id: session.id.clone(),
+                message_id: message.id.clone(),
+                activity_message: "Running command".to_string(),
+                activity_kind: "tool".to_string(),
+                activity_detail: None,
+                activity_output: Some("still passed".to_string()),
+            })
+            .expect("activity is updated");
+
+        let activities = database
+            .list_agent_activities(session.id, vec![message.id])
+            .expect("activities can be listed");
+
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].detail.as_deref(), Some("pnpm test"));
+        assert_eq!(activities[0].output.as_deref(), Some("still passed"));
+    }
+
+    #[test]
+    fn list_messages_page_returns_latest_page_in_ascending_order() {
+        let database = Database::open_in_memory().expect("database opens");
+        let session = database
+            .create_session("Paging test".to_string(), "codex-cli".to_string())
+            .expect("session is created");
+        let first_message = database
+            .create_message(session.id.clone(), MessageRole::User, "one".to_string())
+            .expect("first message is created");
+        let second_message = database
+            .create_message(
+                session.id.clone(),
+                MessageRole::Assistant,
+                "two".to_string(),
+            )
+            .expect("second message is created");
+        let third_message = database
+            .create_message(session.id.clone(), MessageRole::User, "three".to_string())
+            .expect("third message is created");
+
+        database
+            .connection
+            .execute(
+                "UPDATE messages SET created_at = ?1 WHERE id = ?2",
+                params!["2026-01-01T00:00:00Z", first_message.id],
+            )
+            .expect("first timestamp is updated");
+        database
+            .connection
+            .execute(
+                "UPDATE messages SET created_at = ?1 WHERE id = ?2",
+                params!["2026-01-01T00:01:00Z", second_message.id],
+            )
+            .expect("second timestamp is updated");
+        database
+            .connection
+            .execute(
+                "UPDATE messages SET created_at = ?1 WHERE id = ?2",
+                params!["2026-01-01T00:02:00Z", third_message.id],
+            )
+            .expect("third timestamp is updated");
+
+        let latest_page = database
+            .list_messages_page(session.id.clone(), None, 2)
+            .expect("latest page can be listed");
+        let earlier_page = database
+            .list_messages_page(
+                session.id,
+                latest_page
+                    .first()
+                    .map(|message| message.created_at.clone()),
+                2,
+            )
+            .expect("earlier page can be listed");
+
+        assert_eq!(
+            latest_page
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["two", "three"]
+        );
+        assert_eq!(
+            earlier_page
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["one"]
+        );
     }
 }

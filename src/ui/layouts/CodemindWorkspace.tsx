@@ -28,9 +28,11 @@ import { OpenVsxSidebar } from "../features/compatibility/OpenVsxSidebar";
 import { CodeViewer } from "../features/editor/CodeViewer";
 import { FileExplorer } from "../features/explorer/FileExplorer";
 import { GitSidebar } from "../features/git/GitSidebar";
+import { QuickOpenDialog } from "../features/search/QuickOpenDialog";
 import { CommandShell } from "../features/shell/CommandShell";
 import { SessionSidebar } from "../features/sessions/SessionSidebar";
 import { SettingsDialog } from "../features/settings/SettingsDialog";
+import { cn } from "../lib/classNames";
 
 export function CodemindWorkspace() {
   const sessions = useSessions();
@@ -38,6 +40,7 @@ export function CodemindWorkspace() {
   const [selectedDiff, setSelectedDiff] = useState<DiffProposal | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
+  const [isQuickOpenOpen, setIsQuickOpenOpen] = useState(false);
   const selectedSessionId = useWorkspaceStore((store) => store.selectedSessionId);
   const setSelectedSessionId = useWorkspaceStore((store) => store.setSelectedSessionId);
   const selectedFilePath = useWorkspaceStore((store) => store.selectedFilePath);
@@ -92,12 +95,21 @@ export function CodemindWorkspace() {
 
   useEffect(() => {
     function handleWorkspaceShortcut(event: KeyboardEvent) {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+      const key = event.key.toLowerCase();
+
+      if ((event.ctrlKey || event.metaKey) && key === "k") {
         event.preventDefault();
         setIsCommandPaletteOpen((isOpen) => !isOpen);
       }
+
+      if ((event.ctrlKey || event.metaKey) && key === "p") {
+        event.preventDefault();
+        setIsQuickOpenOpen((isOpen) => !isOpen);
+      }
+
       if (event.key === "Escape") {
         setIsCommandPaletteOpen(false);
+        setIsQuickOpenOpen(false);
       }
     }
 
@@ -245,6 +257,15 @@ export function CodemindWorkspace() {
         ]}
         onClose={() => setIsCommandPaletteOpen(false)}
       />
+      <QuickOpenDialog
+        isOpen={isQuickOpenOpen}
+        projectRoot={selectedSession?.projectRoot ?? null}
+        onSelectFile={(relativePath) => {
+          handleSelectFile(relativePath);
+          setIsQuickOpenOpen(false);
+        }}
+        onClose={() => setIsQuickOpenOpen(false)}
+      />
     </main>
   );
 }
@@ -266,26 +287,40 @@ function CommandPalette({
   onClose: () => void;
 }) {
   const [query, setQuery] = useState("");
-  const filteredActions = actions.filter((action) => {
+  const [activeIndex, setActiveIndex] = useState(0);
+
+  const filteredActions = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
     if (!normalizedQuery) {
-      return true;
+      return actions;
     }
-    return (
-      action.title.toLowerCase().includes(normalizedQuery) ||
-      action.detail.toLowerCase().includes(normalizedQuery)
-    );
-  });
+
+    return actions
+      .map((action) => ({
+        action,
+        score: scoreCommandPaletteAction(action, normalizedQuery),
+      }))
+      .filter((result) => result.score > 0)
+      .sort((left, right) => right.score - left.score)
+      .map((result) => result.action);
+  }, [actions, query]);
 
   useEffect(() => {
     if (isOpen) {
       setQuery("");
+      setActiveIndex(0);
     }
   }, [isOpen]);
+
+  useEffect(() => {
+    setActiveIndex(0);
+  }, [query]);
 
   if (!isOpen) {
     return null;
   }
+
+  const activeAction = filteredActions[activeIndex];
 
   function runAction(action: CommandPaletteAction) {
     action.onRun();
@@ -309,8 +344,24 @@ function CommandPalette({
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && filteredActions[0]) {
-                runAction(filteredActions[0]);
+              if (event.key === "ArrowDown") {
+                event.preventDefault();
+                setActiveIndex((index) =>
+                  Math.min(index + 1, Math.max(filteredActions.length - 1, 0)),
+                );
+              }
+
+              if (event.key === "ArrowUp") {
+                event.preventDefault();
+                setActiveIndex((index) => Math.max(index - 1, 0));
+              }
+
+              if (event.key === "Enter" && activeAction) {
+                runAction(activeAction);
+              }
+
+              if (event.key === "Escape") {
+                onClose();
               }
             }}
           />
@@ -319,11 +370,15 @@ function CommandPalette({
           </span>
         </label>
         <div className="max-h-80 overflow-y-auto p-1.5">
-          {filteredActions.map((action) => (
+          {filteredActions.map((action, index) => (
             <button
               key={action.id}
               type="button"
-              className="block w-full rounded-md px-2.5 py-2 text-left hover:bg-zinc-800"
+              className={cn(
+                "block w-full rounded-md px-2.5 py-2 text-left",
+                index === activeIndex ? "bg-zinc-800" : "hover:bg-zinc-800",
+              )}
+              onMouseEnter={() => setActiveIndex(index)}
               onClick={() => runAction(action)}
             >
               <span className="block text-sm font-medium text-zinc-100">{action.title}</span>
@@ -339,6 +394,33 @@ function CommandPalette({
       </div>
     </div>
   );
+}
+
+function scoreCommandPaletteAction(
+  action: CommandPaletteAction,
+  normalizedQuery: string,
+): number {
+  const haystack = `${action.title} ${action.detail}`.toLowerCase();
+
+  if (haystack.includes(normalizedQuery)) {
+    return 1_000 - haystack.indexOf(normalizedQuery);
+  }
+
+  let score = 0;
+  let queryIndex = 0;
+
+  for (const character of haystack) {
+    if (character === normalizedQuery[queryIndex]) {
+      score += 8;
+      queryIndex += 1;
+
+      if (queryIndex === normalizedQuery.length) {
+        return score;
+      }
+    }
+  }
+
+  return 0;
 }
 
 function ActivityRail({ onOpenSettings }: { onOpenSettings: () => void }) {

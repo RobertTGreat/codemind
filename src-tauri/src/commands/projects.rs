@@ -1,5 +1,5 @@
 use crate::{
-    models::{FileTreeNode, ProjectFile, ProjectSearchResult},
+    models::{FileTreeNode, ProjectFile, ProjectIndexEntry, ProjectSearchResult},
     services::projects,
     AppState,
 };
@@ -55,12 +55,23 @@ pub fn search_project_files(
 }
 
 #[tauri::command]
+pub fn list_project_file_index(project_root: String) -> Result<Vec<ProjectIndexEntry>, String> {
+    projects::list_project_file_index(project_root).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn save_project_file(
     project_root: String,
     relative_path: String,
     content: String,
+    expected_version: Option<String>,
 ) -> Result<ProjectFile, String> {
-    projects::write_file_atomically(project_root.clone(), relative_path.clone(), content)
-        .map_err(|error| error.to_string())?;
+    projects::write_file_atomically(
+        project_root.clone(),
+        relative_path.clone(),
+        content,
+        expected_version,
+    )
+    .map_err(|error| error.to_string())?;
     projects::read_project_file(project_root, relative_path).map_err(|error| error.to_string())
 }

@@ -20,17 +20,30 @@ interface ShellHistoryEntry extends ShellCommandOutput {
   startedAt: string;
 }
 
+const MAX_RETAINED_OUTPUT_CHARACTERS = 240_000;
+
+interface PendingShellOutputPatch {
+  stdout: string;
+  stderr: string;
+  cwd?: string;
+  exitCode?: number | null;
+  completedAt?: string;
+}
+
 export function CommandShell({ projectRoot }: CommandShellProps) {
   const [commandText, setCommandText] = useState("");
   const [historyEntries, setHistoryEntries] = useState<ShellHistoryEntry[]>([]);
   const [isRunning, setIsRunning] = useState(false);
-  const [shellKind, setShellKind] = useState<ShellKind>("powerShell");
+  const [shellKind, setShellKind] = useState<ShellKind>(() => getDefaultShellKind());
   const [currentDirectory, setCurrentDirectory] = useState(projectRoot ?? "");
   const [previousDirectory, setPreviousDirectory] = useState<string | null>(null);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const pendingShellOutputRef = useRef<Record<string, PendingShellOutputPatch>>({});
+  const shellFlushFrameRef = useRef<number | null>(null);
   const toggleShell = useWorkspaceStore((store) => store.toggleShell);
+  const shellOptions = getShellOptions();
 
   useEffect(() => {
     setCurrentDirectory(projectRoot ?? "");
@@ -46,30 +59,7 @@ export function CommandShell({ projectRoot }: CommandShellProps) {
   useEffect(() => {
     const unlistenPromise = listen<ShellOutputEvent>("shell-output", (event) => {
       const shellOutput = event.payload;
-      setHistoryEntries((currentEntries) =>
-        currentEntries.map((entry) => {
-          if (entry.id !== shellOutput.runId) {
-            return entry;
-          }
-
-          return {
-            ...entry,
-            cwd: shellOutput.cwd,
-            exitCode: shellOutput.isComplete ? shellOutput.exitCode : entry.exitCode,
-            stdout:
-              shellOutput.stream === "stdout"
-                ? `${entry.stdout}${shellOutput.chunk}`
-                : entry.stdout,
-            stderr:
-              shellOutput.stream === "stderr"
-                ? `${entry.stderr}${shellOutput.chunk}`
-                : entry.stderr,
-            completedAt: shellOutput.isComplete
-              ? new Date().toISOString()
-              : entry.completedAt,
-          };
-        }),
-      );
+      queueShellOutput(shellOutput);
 
       if (shellOutput.isComplete) {
         setActiveRunId((currentRunId) =>
@@ -82,8 +72,72 @@ export function CommandShell({ projectRoot }: CommandShellProps) {
 
     return () => {
       void unlistenPromise.then((unlisten) => unlisten());
+
+      if (shellFlushFrameRef.current !== null) {
+        window.cancelAnimationFrame(shellFlushFrameRef.current);
+        shellFlushFrameRef.current = null;
+      }
+
+      flushShellOutput();
     };
   }, []);
+
+  function queueShellOutput(shellOutput: ShellOutputEvent) {
+    const currentPatch = pendingShellOutputRef.current[shellOutput.runId] ?? {
+      stdout: "",
+      stderr: "",
+    };
+
+    pendingShellOutputRef.current[shellOutput.runId] = {
+      ...currentPatch,
+      stdout:
+        shellOutput.stream === "stdout"
+          ? `${currentPatch.stdout}${shellOutput.chunk}`
+          : currentPatch.stdout,
+      stderr:
+        shellOutput.stream === "stderr"
+          ? `${currentPatch.stderr}${shellOutput.chunk}`
+          : currentPatch.stderr,
+      cwd: shellOutput.cwd,
+      exitCode: shellOutput.isComplete ? shellOutput.exitCode : currentPatch.exitCode,
+      completedAt: shellOutput.isComplete ? new Date().toISOString() : currentPatch.completedAt,
+    };
+
+    if (shellFlushFrameRef.current !== null) {
+      return;
+    }
+
+    shellFlushFrameRef.current = window.requestAnimationFrame(flushShellOutput);
+  }
+
+  function flushShellOutput() {
+    const pendingPatches = pendingShellOutputRef.current;
+    pendingShellOutputRef.current = {};
+    shellFlushFrameRef.current = null;
+
+    if (Object.keys(pendingPatches).length === 0) {
+      return;
+    }
+
+    setHistoryEntries((currentEntries) =>
+      currentEntries.map((entry) => {
+        const patch = pendingPatches[entry.id];
+
+        if (!patch) {
+          return entry;
+        }
+
+        return {
+          ...entry,
+          cwd: patch.cwd ?? entry.cwd,
+          exitCode: patch.exitCode ?? entry.exitCode,
+          stdout: appendWithLimit(entry.stdout, patch.stdout),
+          stderr: appendWithLimit(entry.stderr, patch.stderr),
+          completedAt: patch.completedAt ?? entry.completedAt,
+        };
+      }),
+    );
+  }
 
   async function handleRunCommand() {
     const command = commandText.trim();
@@ -262,8 +316,11 @@ export function CommandShell({ projectRoot }: CommandShellProps) {
             value={shellKind}
             onChange={(event) => setShellKind(event.target.value as ShellKind)}
           >
-            <option value="powerShell">PowerShell</option>
-            <option value="commandPrompt">Command Prompt</option>
+            {shellOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
           </select>
           <span className="truncate text-xs font-normal text-zinc-500">
             {formatDirectory(currentDirectory || projectRoot || "Workspace")}
@@ -362,6 +419,44 @@ export function CommandShell({ projectRoot }: CommandShellProps) {
       </div>
     </section>
   );
+}
+
+function appendWithLimit(currentValue: string, nextChunk: string) {
+  const combinedValue = `${currentValue}${nextChunk}`;
+
+  if (combinedValue.length <= MAX_RETAINED_OUTPUT_CHARACTERS) {
+    return combinedValue;
+  }
+
+  return [
+    "\n[Codemind truncated older terminal output]\n\n",
+    combinedValue.slice(-MAX_RETAINED_OUTPUT_CHARACTERS),
+  ].join("");
+}
+
+function getDefaultShellKind(): ShellKind {
+  return isWindowsUserAgent() ? "powerShell" : "sh";
+}
+
+function getShellOptions(): Array<{ value: ShellKind; label: string }> {
+  return isWindowsUserAgent()
+    ? [
+        { value: "powerShell", label: "PowerShell" },
+        { value: "commandPrompt", label: "Command Prompt" },
+      ]
+    : [
+        { value: "sh", label: "sh" },
+        { value: "bash", label: "bash" },
+        { value: "zsh", label: "zsh" },
+      ];
+}
+
+function isWindowsUserAgent(): boolean {
+  if (typeof navigator === "undefined") {
+    return true;
+  }
+
+  return navigator.userAgent.toLowerCase().includes("windows");
 }
 
 function isChangeDirectoryCommand(command: string): boolean {

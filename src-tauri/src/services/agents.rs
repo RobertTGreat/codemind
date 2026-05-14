@@ -1,9 +1,13 @@
-use crate::{database::Database, models::AgentTokenEvent, services::cli};
+use crate::{
+    database::{AgentActivityUpsert, Database},
+    models::AgentTokenEvent,
+    services::cli,
+};
 use serde_json::Value;
 use std::{
     collections::HashMap,
     fs,
-    io::{BufRead, BufReader, Read},
+    io::{BufRead, BufReader, Read, Write},
     process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -15,6 +19,8 @@ use uuid::Uuid;
 
 const STREAM_EVENT_NAME: &str = "agent-token";
 const STOPPED_RESPONSE_TEXT: &str = "Stopped by user.";
+const MAX_ACTIVITY_DETAIL_CHARACTERS: usize = 40_000;
+const MAX_ACTIVITY_OUTPUT_CHARACTERS: usize = 120_000;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -22,6 +28,7 @@ struct AgentStreamContext {
     app_handle: AppHandle,
     session_id: String,
     message_id: String,
+    activity_database: Option<Database>,
 }
 
 struct ActiveAgentRun {
@@ -72,6 +79,7 @@ pub fn stream_agent_response(
             app_handle,
             session_id,
             message_id,
+            activity_database: Database::open().ok(),
         };
         let cancellation_token =
             register_active_agent_run(&stream_context.session_id, &stream_context.message_id);
@@ -114,9 +122,10 @@ pub fn stream_agent_response(
         };
         let was_cancelled = cancellation_token.is_cancelled();
 
-        if let Ok(database) = Database::open() {
-            let _ = database
-                .update_message_content(stream_context.message_id.clone(), response.clone());
+        if let Some(database) = stream_context.activity_database.as_ref() {
+            let _ = database.update_message_content(stream_context.message_id.clone(), response);
+        } else if let Ok(database) = Database::open() {
+            let _ = database.update_message_content(stream_context.message_id.clone(), response);
         }
 
         emit_agent_activity(
@@ -284,6 +293,26 @@ fn emit_agent_activity_with_details(
     activity_detail: Option<String>,
     activity_output: Option<String>,
 ) {
+    let persistent_activity_id = create_persistent_activity_id(
+        &stream_context.message_id,
+        activity_id.as_deref(),
+        activity_kind,
+        activity_message,
+    );
+    let activity_detail = activity_detail
+        .map(|detail| truncate_activity_text(&detail, MAX_ACTIVITY_DETAIL_CHARACTERS));
+    let activity_output = activity_output
+        .map(|output| truncate_activity_text(&output, MAX_ACTIVITY_OUTPUT_CHARACTERS));
+
+    persist_agent_activity(
+        stream_context,
+        &persistent_activity_id,
+        activity_message,
+        activity_kind,
+        activity_detail.clone(),
+        activity_output.clone(),
+    );
+
     let _ = stream_context.app_handle.emit(
         STREAM_EVENT_NAME,
         AgentTokenEvent {
@@ -291,7 +320,7 @@ fn emit_agent_activity_with_details(
             message_id: stream_context.message_id.clone(),
             token: String::new(),
             is_complete: false,
-            activity_id,
+            activity_id: Some(persistent_activity_id),
             activity_message: Some(activity_message.to_string()),
             activity_kind: Some(activity_kind.to_string()),
             activity_detail,
@@ -318,6 +347,21 @@ fn emit_agent_token(stream_context: &AgentStreamContext, token: String) {
 }
 
 fn emit_agent_complete(stream_context: AgentStreamContext) {
+    let activity_id = create_persistent_activity_id(
+        &stream_context.message_id,
+        None,
+        "status",
+        "Agent response complete",
+    );
+    persist_agent_activity(
+        &stream_context,
+        &activity_id,
+        "Agent response complete",
+        "status",
+        None,
+        None,
+    );
+
     let _ = stream_context.app_handle.emit(
         STREAM_EVENT_NAME,
         AgentTokenEvent {
@@ -325,13 +369,87 @@ fn emit_agent_complete(stream_context: AgentStreamContext) {
             message_id: stream_context.message_id,
             token: String::new(),
             is_complete: true,
-            activity_id: None,
+            activity_id: Some(activity_id),
             activity_message: Some("Agent response complete".to_string()),
             activity_kind: Some("status".to_string()),
             activity_detail: None,
             activity_output: None,
         },
     );
+}
+
+fn create_persistent_activity_id(
+    message_id: &str,
+    activity_id: Option<&str>,
+    activity_kind: &str,
+    activity_message: &str,
+) -> String {
+    if let Some(activity_id) = activity_id.filter(|value| !value.trim().is_empty()) {
+        return format!("{message_id}:{activity_id}");
+    }
+
+    let normalized_message_text = activity_message
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let normalized_message = normalized_message_text
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .take(8)
+        .collect::<Vec<_>>()
+        .join("-");
+
+    format!(
+        "{}:{}:{}:{}",
+        message_id,
+        activity_kind,
+        normalized_message,
+        Uuid::new_v4()
+    )
+}
+
+fn persist_agent_activity(
+    stream_context: &AgentStreamContext,
+    activity_id: &str,
+    activity_message: &str,
+    activity_kind: &str,
+    activity_detail: Option<String>,
+    activity_output: Option<String>,
+) {
+    if let Some(database) = stream_context.activity_database.as_ref() {
+        let _ = database.upsert_agent_activity(AgentActivityUpsert {
+            activity_id: activity_id.to_string(),
+            session_id: stream_context.session_id.clone(),
+            message_id: stream_context.message_id.clone(),
+            activity_message: activity_message.to_string(),
+            activity_kind: activity_kind.to_string(),
+            activity_detail,
+            activity_output,
+        });
+    }
+}
+
+fn truncate_activity_text(activity_text: &str, maximum_characters: usize) -> String {
+    if activity_text.chars().count() <= maximum_characters {
+        return activity_text.to_string();
+    }
+
+    let retained_suffix = activity_text
+        .chars()
+        .rev()
+        .take(maximum_characters)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+
+    format!("[Codemind truncated older activity output]\n\n{retained_suffix}")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -388,13 +506,21 @@ fn create_codex_cli_response(
         ));
     }
 
-    arguments.push(prompt_with_rules);
+    arguments.push("-".to_string());
 
     let codex_executable = cli::resolve_codex_executable()?;
+    let login_status = cli::read_codex_login_status(&codex_executable);
+    if !login_status.is_authenticated {
+        return Err(format!(
+            "Codex CLI is installed but is not logged in. Run `codex login` or use the Codemind sign-in button, then try again.\n\nLogin status: {}",
+            login_status.status_text
+        ));
+    }
+
     let mut codex_command = codex_executable.create_command();
     codex_command
         .args(arguments)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     configure_long_running_child_process(&mut codex_command);
@@ -421,6 +547,11 @@ fn create_codex_cli_response(
         let _ = reader.read_to_string(&mut stderr_text);
         stderr_text
     });
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(prompt_with_rules.as_bytes())
+            .map_err(|error| error.to_string())?;
+    }
 
     let mut streamed_response = String::new();
     let mut reader = BufReader::new(stdout);
@@ -762,7 +893,7 @@ fn create_prompt_with_request_context(
     }
 
     format!(
-        "Follow these session settings while responding:\n\n{mode_instruction}\n{permission_instruction}\n{shell_instruction}\n\nFollow these global and project rules while responding:\n\n{normalized_rule_context}\n\nUser request:\n{prompt}"
+        "Complete the user request below. Do not respond by merely acknowledging these settings or rules.\n\nUser request:\n{prompt}\n\nSession settings:\n{mode_instruction}\n{permission_instruction}\n{shell_instruction}\n\nGlobal and project rules:\n{normalized_rule_context}"
     )
 }
 
@@ -862,5 +993,33 @@ mod tests {
             arguments,
             vec!["--dangerously-bypass-approvals-and-sandbox"]
         );
+    }
+
+    #[test]
+    fn prompt_context_prioritizes_the_user_request() {
+        let prompt = create_prompt_with_request_context(
+            "append a line to README.md",
+            Some("Use clear names."),
+            Some("build"),
+            Some("supervised"),
+        );
+
+        assert!(prompt.starts_with("Complete the user request below."));
+        assert!(prompt.contains("User request:\nappend a line to README.md"));
+        assert!(prompt.contains("Do not respond by merely acknowledging"));
+    }
+
+    #[test]
+    fn prompt_context_preserves_multiline_user_request() {
+        let prompt = create_prompt_with_request_context(
+            "add a test line at the end of README.md\nThen report what changed.",
+            Some("Use clear names."),
+            Some("build"),
+            Some("supervised"),
+        );
+
+        assert!(prompt.contains(
+            "User request:\nadd a test line at the end of README.md\nThen report what changed."
+        ));
     }
 }

@@ -24,6 +24,9 @@ static ACTIVE_SHELL_RUNS: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new(
 pub enum ShellKind {
     CommandPrompt,
     PowerShell,
+    Sh,
+    Bash,
+    Zsh,
 }
 
 #[derive(Debug, Serialize)]
@@ -74,8 +77,10 @@ pub struct ExtensionInstallResult {
 pub struct ProviderInstallStatus {
     pub provider_id: String,
     pub is_installed: bool,
+    pub is_authenticated: bool,
     pub executable_path: Option<String>,
     pub install_command: String,
+    pub authentication_status: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -83,8 +88,10 @@ pub struct ProviderInstallStatus {
 pub struct ProviderInstallResult {
     pub provider_id: String,
     pub is_installed: bool,
+    pub is_authenticated: bool,
     pub executable_path: Option<String>,
     pub install_command: String,
+    pub authentication_status: Option<String>,
     pub stdout: String,
     pub stderr: String,
 }
@@ -231,7 +238,13 @@ pub fn start_shell_command(
             let output_run_id = thread_run_id.clone();
             let output_cwd = thread_working_directory.to_string_lossy().to_string();
             std::thread::spawn(move || {
-                stream_shell_output(output_app_handle, output_run_id, output_cwd, "stdout", stdout);
+                stream_shell_output(
+                    output_app_handle,
+                    output_run_id,
+                    output_cwd,
+                    "stdout",
+                    stdout,
+                );
             })
         });
 
@@ -240,7 +253,13 @@ pub fn start_shell_command(
             let output_run_id = thread_run_id.clone();
             let output_cwd = thread_working_directory.to_string_lossy().to_string();
             std::thread::spawn(move || {
-                stream_shell_output(output_app_handle, output_run_id, output_cwd, "stderr", stderr);
+                stream_shell_output(
+                    output_app_handle,
+                    output_run_id,
+                    output_cwd,
+                    "stderr",
+                    stderr,
+                );
             })
         });
 
@@ -382,8 +401,10 @@ pub fn install_provider(agent_id: String) -> Result<ProviderInstallResult, Strin
     Ok(ProviderInstallResult {
         provider_id: agent_id,
         is_installed: install_status.is_installed,
+        is_authenticated: install_status.is_authenticated,
         executable_path: install_status.executable_path,
         install_command: install_status.install_command,
+        authentication_status: install_status.authentication_status,
         stdout,
         stderr,
     })
@@ -422,22 +443,29 @@ fn require_codex_agent(agent_id: &str) -> Result<(), String> {
 
 fn create_codex_install_status(agent_id: String) -> ProviderInstallStatus {
     match cli::resolve_codex_executable() {
-        Ok(codex_executable) => ProviderInstallStatus {
-            provider_id: agent_id,
-            is_installed: true,
-            executable_path: Some(
-                codex_executable
-                    .executable_path()
-                    .to_string_lossy()
-                    .to_string(),
-            ),
-            install_command: cli::CODEX_CLI_INSTALL_COMMAND.to_string(),
-        },
+        Ok(codex_executable) => {
+            let login_status = cli::read_codex_login_status(&codex_executable);
+            ProviderInstallStatus {
+                provider_id: agent_id,
+                is_installed: true,
+                is_authenticated: login_status.is_authenticated,
+                executable_path: Some(
+                    codex_executable
+                        .executable_path()
+                        .to_string_lossy()
+                        .to_string(),
+                ),
+                install_command: cli::CODEX_CLI_INSTALL_COMMAND.to_string(),
+                authentication_status: Some(login_status.status_text),
+            }
+        }
         Err(_) => ProviderInstallStatus {
             provider_id: agent_id,
             is_installed: false,
+            is_authenticated: false,
             executable_path: None,
             install_command: cli::CODEX_CLI_INSTALL_COMMAND.to_string(),
+            authentication_status: None,
         },
     }
 }
@@ -461,7 +489,7 @@ fn create_shell_command(
                 }
                 shell_command
             }
-            ShellKind::PowerShell => {
+            ShellKind::PowerShell | ShellKind::Sh | ShellKind::Bash | ShellKind::Zsh => {
                 let mut shell_command = Command::new("powershell");
                 shell_command
                     .args(["-NoLogo", "-NoProfile", "-Command", command])
@@ -475,7 +503,13 @@ fn create_shell_command(
             }
         }
     } else {
-        let mut shell_command = Command::new("sh");
+        let executable = match shell_kind {
+            ShellKind::Bash => "bash",
+            ShellKind::Zsh => "zsh",
+            ShellKind::CommandPrompt | ShellKind::PowerShell | ShellKind::Sh => "sh",
+        };
+
+        let mut shell_command = Command::new(executable);
         shell_command
             .args(["-lc", command])
             .current_dir(working_directory);
@@ -956,15 +990,17 @@ mod tests {
     fn validate_open_vsx_download_url_rejects_lookalike_hosts() {
         assert!(validate_open_vsx_download_url("https://open-vsx.org/api/item.vsix").is_ok());
         assert!(
-            validate_open_vsx_download_url("https://open-vsx.org.evil.test/api/item.vsix")
-                .is_err()
+            validate_open_vsx_download_url("https://open-vsx.org.evil.test/api/item.vsix").is_err()
         );
         assert!(validate_open_vsx_download_url("http://open-vsx.org/api/item.vsix").is_err());
     }
 
     #[test]
     fn unquote_shell_path_removes_matching_outer_quotes() {
-        assert_eq!(unquote_shell_path("\"C:\\Projects\\Codemind\""), "C:\\Projects\\Codemind");
+        assert_eq!(
+            unquote_shell_path("\"C:\\Projects\\Codemind\""),
+            "C:\\Projects\\Codemind"
+        );
         assert_eq!(unquote_shell_path("'folder name'"), "folder name");
         assert_eq!(unquote_shell_path("\"missing"), "\"missing");
     }

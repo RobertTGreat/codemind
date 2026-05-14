@@ -12,9 +12,17 @@ export interface ProjectFile {
   absolutePath: string;
   content: string;
   language: string;
+  version: string;
 }
 
 export interface ProjectSearchResult {
+  name: string;
+  relativePath: string;
+  parentPath: string;
+  isDirectory: boolean;
+}
+
+export interface ProjectIndexEntry {
   name: string;
   relativePath: string;
   parentPath: string;

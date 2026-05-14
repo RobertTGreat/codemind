@@ -84,6 +84,7 @@ pub fn approve_diff_proposal(
         project_root,
         proposal.relative_path,
         proposal.proposed_content,
+        None,
     )
     .map_err(|error| error.to_string())?;
     state

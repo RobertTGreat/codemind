@@ -33,3 +33,16 @@ export interface GitOperationResult {
   stdout: string;
   stderr: string;
 }
+
+export interface GitFileDiff {
+  path: string;
+  staged: boolean;
+  diffText: string;
+}
+
+export interface GitFileVersion {
+  path: string;
+  staged: boolean;
+  originalContent: string;
+  modifiedContent: string;
+}

@@ -5,10 +5,20 @@ use std::{
 };
 
 pub const CODEX_CLI_INSTALL_COMMAND: &str = "npm i -g @openai/codex";
+const UNKNOWN_LOGIN_STATUS_TEXT: &str = "Codex login status could not be checked.";
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[derive(Debug, Clone)]
 pub struct ResolvedCodexExecutable {
     executable_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct CodexLoginStatus {
+    pub is_authenticated: bool,
+    pub status_text: String,
 }
 
 impl ResolvedCodexExecutable {
@@ -18,6 +28,45 @@ impl ResolvedCodexExecutable {
 
     pub fn create_command(&self) -> Command {
         create_command_for_executable(&self.executable_path)
+    }
+}
+
+pub fn read_codex_login_status(codex_executable: &ResolvedCodexExecutable) -> CodexLoginStatus {
+    let mut status_command = codex_executable.create_command();
+    status_command.args(["login", "status"]);
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        status_command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let Ok(output) = status_command.output() else {
+        return CodexLoginStatus {
+            is_authenticated: false,
+            status_text: UNKNOWN_LOGIN_STATUS_TEXT.to_string(),
+        };
+    };
+
+    let status_text = [
+        String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    ]
+    .into_iter()
+    .filter(|text| !text.is_empty())
+    .collect::<Vec<_>>()
+    .join("\n");
+    let status_text = if status_text.is_empty() {
+        UNKNOWN_LOGIN_STATUS_TEXT.to_string()
+    } else {
+        status_text
+    };
+    let normalized_status_text = status_text.to_lowercase();
+
+    CodexLoginStatus {
+        is_authenticated: output.status.success()
+            && normalized_status_text.starts_with("logged in"),
+        status_text,
     }
 }
 
@@ -136,6 +185,13 @@ mod tests {
     #[test]
     fn install_command_uses_openai_codex_npm_package() {
         assert_eq!(CODEX_CLI_INSTALL_COMMAND, "npm i -g @openai/codex");
+    }
+
+    #[test]
+    fn unknown_login_status_is_not_authenticated() {
+        assert!(!UNKNOWN_LOGIN_STATUS_TEXT
+            .to_lowercase()
+            .contains("logged in"));
     }
 
     #[cfg(target_os = "windows")]

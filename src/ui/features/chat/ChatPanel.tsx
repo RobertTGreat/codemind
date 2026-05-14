@@ -24,16 +24,22 @@ import {
   User,
   Wrench,
 } from "lucide-react";
-import { type ReactNode, useEffect, useRef, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import { agentProviders } from "../../../domain/models/agent";
-import type { AgentTokenEvent, ChatMessage, Session } from "../../../domain/models/session";
+import type {
+  AgentActivity,
+  AgentTokenEvent,
+  ChatMessage,
+  Session,
+} from "../../../domain/models/session";
 import { createAgentRuleContext } from "../../../domain/logic/ruleContext";
 import { validatePrompt } from "../../../application/use-cases/messageWorkflow";
 import {
   codemindQueryKeys,
+  useAgentActivities,
   useInstallProvider,
-  useMessages,
+  useMessagePages,
   useProviderInstallStatus,
   useSendMessage,
   useStopMessageResponse,
@@ -135,7 +141,24 @@ export function ChatPanel({ session, onSelectDiff, selectedDiffId }: ChatPanelPr
   const pendingTokenBufferRef = useRef<Record<string, Record<string, string>>>({});
   const tokenFlushFrameRef = useRef<number | null>(null);
   const currentSessionId = session?.id ?? null;
-  const messages = useMessages(currentSessionId);
+  const messagePages = useMessagePages(currentSessionId);
+  const pagedMessages = useMemo(
+    () => (messagePages.data ? [...messagePages.data.pages].reverse().flat() : []),
+    [messagePages.data],
+  );
+  const pagedMessageIds = useMemo(
+    () => pagedMessages.map((message) => message.id),
+    [pagedMessages],
+  );
+  const savedAgentActivities = useAgentActivities(currentSessionId, pagedMessageIds);
+  const displayedActivityByMessageId = useMemo(
+    () =>
+      mergeActivityByMessageId(
+        createActivityByMessageId(savedAgentActivities.data ?? []),
+        activityByMessageId,
+      ),
+    [activityByMessageId, savedAgentActivities.data],
+  );
   const sendMessage = useSendMessage(currentSessionId);
   const stopMessageResponse = useStopMessageResponse(currentSessionId);
   const updateSessionAgent = useUpdateSessionAgent();
@@ -149,7 +172,14 @@ export function ChatPanel({ session, onSelectDiff, selectedDiffId }: ChatPanelPr
   const isSelectedCodexCliMissing =
     selectedProviderId === "codex-cli" &&
     codexCliInstallStatus.data?.isInstalled === false;
-  const isSelectedProviderLoggedIn = Boolean(selectedProvider?.isAvailable);
+  const isSelectedCodexCliUnauthenticated =
+    selectedProviderId === "codex-cli" &&
+    codexCliInstallStatus.data?.isInstalled === true &&
+    codexCliInstallStatus.data.isAuthenticated === false;
+  const isSelectedProviderLoggedIn =
+    selectedProviderId === "codex-cli"
+      ? Boolean(codexCliInstallStatus.data?.isAuthenticated)
+      : Boolean(selectedProvider?.isAvailable);
   const selectedModelLabel =
     selectedProvider?.models.find((model) => model.value === selectedModel)?.label ??
     selectedProvider?.models[0]?.label ??
@@ -159,7 +189,7 @@ export function ChatPanel({ session, onSelectDiff, selectedDiffId }: ChatPanelPr
       ?.label ??
     selectedProvider?.reasoningEfforts[0]?.label ??
     "Reasoning";
-  const latestMessageId = messages.data?.[messages.data.length - 1]?.id ?? null;
+  const latestMessageId = pagedMessages[pagedMessages.length - 1]?.id ?? null;
   const isResponseActive = sendMessage.isPending || Boolean(activeAssistantMessageId);
   const activeIndicatorMessageId =
     activeAssistantMessageId ?? (sendMessage.isPending ? latestMessageId : null);
@@ -213,6 +243,25 @@ export function ChatPanel({ session, onSelectDiff, selectedDiffId }: ChatPanelPr
           );
           setIsStoppingResponse(false);
           flushPendingMessageTokens();
+          queryClient.invalidateQueries({
+            queryKey: ["agent-activities", event.payload.sessionId],
+            exact: false,
+          });
+          if (session?.projectRoot) {
+            queryClient.invalidateQueries({
+              queryKey: codemindQueryKeys.gitStatus(session.projectRoot),
+            });
+            queryClient.invalidateQueries({
+              queryKey: codemindQueryKeys.projectTree(session.projectRoot),
+            });
+            queryClient.invalidateQueries({
+              queryKey: codemindQueryKeys.projectFileIndex(session.projectRoot),
+            });
+            queryClient.invalidateQueries({
+              queryKey: ["file", session.projectRoot],
+              exact: false,
+            });
+          }
         } else {
           setActiveAssistantMessageId(event.payload.messageId);
         }
@@ -289,7 +338,7 @@ export function ChatPanel({ session, onSelectDiff, selectedDiffId }: ChatPanelPr
       }
       flushPendingMessageTokens();
     };
-  }, [currentSessionId, queryClient]);
+  }, [currentSessionId, queryClient, session?.projectRoot]);
 
   useEffect(() => {
     setActiveAssistantMessageId(null);
@@ -327,7 +376,7 @@ export function ChatPanel({ session, onSelectDiff, selectedDiffId }: ChatPanelPr
         behavior: "smooth",
       });
     });
-  }, [messages.data, activityByMessageId, activeIndicatorMessageId]);
+  }, [pagedMessages, displayedActivityByMessageId, activeIndicatorMessageId]);
 
   function handleMessageListScroll() {
     const messageListElement = messageListRef.current;
@@ -353,6 +402,15 @@ export function ChatPanel({ session, onSelectDiff, selectedDiffId }: ChatPanelPr
 
     if (isSelectedCodexCliMissing) {
       setComposerError("Install Codex CLI before sending with this provider.");
+      return;
+    }
+
+    if (isSelectedCodexCliUnauthenticated) {
+      setComposerError(
+        `Sign in to Codex CLI before sending. ${
+          codexCliInstallStatus.data?.authenticationStatus ?? ""
+        }`.trim(),
+      );
       return;
     }
 
@@ -419,6 +477,9 @@ export function ChatPanel({ session, onSelectDiff, selectedDiffId }: ChatPanelPr
         title: "Login started",
         description: `${selectedProvider?.name ?? "Provider"} opened its login flow.`,
       });
+      window.setTimeout(() => {
+        void codexCliInstallStatus.refetch();
+      }, 1500);
     } catch (error) {
       showToast({
         kind: "error",
@@ -508,6 +569,27 @@ export function ChatPanel({ session, onSelectDiff, selectedDiffId }: ChatPanelPr
               : message;
           }),
       );
+
+      queryClient.setQueryData<InfiniteData<ChatMessage[], string | null>>(
+        codemindQueryKeys.messagePages(sessionId),
+        (currentMessagePages) => {
+          if (!currentMessagePages) {
+            return currentMessagePages;
+          }
+
+          return {
+            ...currentMessagePages,
+            pages: currentMessagePages.pages.map((messagePage) =>
+              messagePage.map((message) => {
+                const pendingToken = tokenByMessageId[message.id];
+                return pendingToken
+                  ? { ...message, content: `${message.content}${pendingToken}` }
+                  : message;
+              }),
+            ),
+          };
+        },
+      );
     }
   }
 
@@ -557,8 +639,23 @@ export function ChatPanel({ session, onSelectDiff, selectedDiffId }: ChatPanelPr
             Create or select a chat to begin.
           </div>
         ) : null}
-        {messages.data?.map((message) => {
-          const activityMessages = activityByMessageId[message.id] ?? [];
+        {session && messagePages.isLoading ? (
+          <p className="p-3 text-sm text-zinc-500">Loading messages...</p>
+        ) : null}
+        {session && messagePages.hasNextPage ? (
+          <div className="mb-4 flex justify-center">
+            <button
+              type="button"
+              className="rounded border border-zinc-800 bg-[#202020] px-3 py-1.5 text-xs text-zinc-400 hover:border-zinc-700 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={messagePages.isFetchingNextPage}
+              onClick={() => void messagePages.fetchNextPage()}
+            >
+              {messagePages.isFetchingNextPage ? "Loading..." : "Load earlier messages"}
+            </button>
+          </div>
+        ) : null}
+        {pagedMessages.map((message) => {
+          const activityMessages = displayedActivityByMessageId[message.id] ?? [];
           const selectedTimelineFilter = timelineFilterByMessageId[message.id] ?? "all";
           const visibleActivityMessages = filterActivityMessages(
             activityMessages,
@@ -657,9 +754,13 @@ export function ChatPanel({ session, onSelectDiff, selectedDiffId }: ChatPanelPr
                 selectedReasoningLabel={selectedReasoningLabel}
                 selectedApprovalMode={selectedApprovalMode}
                 isSelectedProviderMissing={isSelectedCodexCliMissing}
+                isSelectedProviderUnauthenticated={isSelectedCodexCliUnauthenticated}
                 isInstallingProvider={installCodexCli.isPending}
                 installCommand={
                   codexCliInstallStatus.data?.installCommand ?? "npm i -g @openai/codex"
+                }
+                authenticationStatus={
+                  codexCliInstallStatus.data?.authenticationStatus ?? null
                 }
                 installError={
                   installCodexCli.error ? formatUnknownError(installCodexCli.error) : null
@@ -670,6 +771,7 @@ export function ChatPanel({ session, onSelectDiff, selectedDiffId }: ChatPanelPr
                 onReasoningChange={setSelectedReasoning}
                 onApprovalModeChange={setSelectedApprovalMode}
                 onInstallProvider={handleInstallCodexCli}
+                onProviderLogin={handleProviderLogin}
               />
               <BuildPlanToggle
                 selectedWorkMode={selectedWorkMode}
@@ -701,7 +803,9 @@ export function ChatPanel({ session, onSelectDiff, selectedDiffId }: ChatPanelPr
                 }
                 disabled={
                   !session ||
-                  (isResponseActive ? isStoppingResponse : isSelectedCodexCliMissing)
+                  (isResponseActive
+                    ? isStoppingResponse
+                    : isSelectedCodexCliMissing || isSelectedCodexCliUnauthenticated)
                 }
                 onClick={isResponseActive ? handleStopResponse : handleSendMessage}
               />
@@ -773,8 +877,10 @@ interface ProviderModelMenuProps {
   selectedReasoningLabel: string;
   selectedApprovalMode: ApprovalMode;
   isSelectedProviderMissing: boolean;
+  isSelectedProviderUnauthenticated: boolean;
   isInstallingProvider: boolean;
   installCommand: string;
+  authenticationStatus: string | null;
   installError: string | null;
   onOpenChange: (isOpen: boolean) => void;
   onProviderChange: (agentId: string) => void;
@@ -782,6 +888,7 @@ interface ProviderModelMenuProps {
   onReasoningChange: (reasoning: string) => void;
   onApprovalModeChange: (approvalMode: ApprovalMode) => void;
   onInstallProvider: () => void;
+  onProviderLogin: () => void;
 }
 
 function ProviderModelMenu({
@@ -794,8 +901,10 @@ function ProviderModelMenu({
   selectedReasoningLabel,
   selectedApprovalMode,
   isSelectedProviderMissing,
+  isSelectedProviderUnauthenticated,
   isInstallingProvider,
   installCommand,
+  authenticationStatus,
   installError,
   onOpenChange,
   onProviderChange,
@@ -803,6 +912,7 @@ function ProviderModelMenu({
   onReasoningChange,
   onApprovalModeChange,
   onInstallProvider,
+  onProviderLogin,
 }: ProviderModelMenuProps) {
   const [modelSearchQuery, setModelSearchQuery] = useState("");
   const [isPermissionSettingsOpen, setIsPermissionSettingsOpen] = useState(false);
@@ -1030,19 +1140,28 @@ function ProviderModelMenu({
               </div>
 
             </div>
-            {isSelectedProviderMissing ? (
+            {isSelectedProviderMissing || isSelectedProviderUnauthenticated ? (
               <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/75 p-4 backdrop-blur-[1px]">
                 <div className="w-full max-w-[280px] rounded-md border border-zinc-700 bg-[#181818] p-4 shadow-2xl">
                   <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-zinc-100">
                     <Terminal size={15} />
-                    Codex CLI missing
+                    {isSelectedProviderMissing ? "Codex CLI missing" : "Codex CLI sign-in needed"}
                   </div>
                   <p className="mb-3 text-xs leading-5 text-zinc-400">
-                    Install Codex CLI to use these provider models.
+                    {isSelectedProviderMissing
+                      ? "Install Codex CLI to use these provider models."
+                      : "Codex CLI is installed, but it is not authenticated for agent runs."}
                   </p>
-                  <pre className="mb-3 overflow-x-auto rounded border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-300">
-                    <code>{installCommand}</code>
-                  </pre>
+                  {isSelectedProviderMissing ? (
+                    <pre className="mb-3 overflow-x-auto rounded border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-300">
+                      <code>{installCommand}</code>
+                    </pre>
+                  ) : null}
+                  {isSelectedProviderUnauthenticated && authenticationStatus ? (
+                    <p className="mb-3 max-h-20 overflow-y-auto rounded border border-zinc-800 bg-zinc-950 p-2 text-xs leading-5 text-zinc-300">
+                      {authenticationStatus}
+                    </p>
+                  ) : null}
                   {installError ? (
                     <p className="mb-3 max-h-20 overflow-y-auto rounded border border-red-500/20 bg-red-500/10 p-2 text-xs leading-5 text-red-200">
                       {installError}
@@ -1051,17 +1170,25 @@ function ProviderModelMenu({
                   <Button
                     className="w-full"
                     variant="primary"
-                    disabled={isInstallingProvider}
+                    disabled={isSelectedProviderMissing && isInstallingProvider}
                     icon={
-                      isInstallingProvider ? (
+                      isSelectedProviderMissing && isInstallingProvider ? (
                         <LoaderCircle size={14} className="animate-spin" />
-                      ) : (
+                      ) : isSelectedProviderMissing ? (
                         <Download size={14} />
+                      ) : (
+                        <LogIn size={14} />
                       )
                     }
-                    onClick={onInstallProvider}
+                    onClick={
+                      isSelectedProviderMissing ? onInstallProvider : onProviderLogin
+                    }
                   >
-                    {isInstallingProvider ? "Installing" : "Install Codex CLI"}
+                    {isSelectedProviderMissing
+                      ? isInstallingProvider
+                        ? "Installing"
+                        : "Install Codex CLI"
+                      : "Sign in"}
                   </Button>
                 </div>
               </div>
@@ -1566,6 +1693,76 @@ function ToastViewport({
       ))}
     </div>
   );
+}
+
+function createActivityByMessageId(
+  agentActivities: AgentActivity[],
+): Record<string, ActivityEntry[]> {
+  return agentActivities.reduce<Record<string, ActivityEntry[]>>(
+    (activityByMessageId, agentActivity) => {
+      activityByMessageId[agentActivity.messageId] = [
+        ...(activityByMessageId[agentActivity.messageId] ?? []),
+        {
+          id: agentActivity.id,
+          message: agentActivity.message,
+          kind: normalizeActivityKind(agentActivity.kind),
+          detail: agentActivity.detail,
+          output: agentActivity.output,
+        },
+      ];
+      return activityByMessageId;
+    },
+    {},
+  );
+}
+
+function mergeActivityByMessageId(
+  savedActivityByMessageId: Record<string, ActivityEntry[]>,
+  liveActivityByMessageId: Record<string, ActivityEntry[]>,
+): Record<string, ActivityEntry[]> {
+  const mergedActivityByMessageId: Record<string, ActivityEntry[]> = {};
+  const messageIds = new Set([
+    ...Object.keys(savedActivityByMessageId),
+    ...Object.keys(liveActivityByMessageId),
+  ]);
+
+  for (const messageId of messageIds) {
+    const mergedActivities = [...(savedActivityByMessageId[messageId] ?? [])];
+    for (const liveActivity of liveActivityByMessageId[messageId] ?? []) {
+      const existingActivityIndex = mergedActivities.findIndex(
+        (activity) => activity.id === liveActivity.id,
+      );
+      if (existingActivityIndex >= 0) {
+        mergedActivities[existingActivityIndex] = {
+          ...mergedActivities[existingActivityIndex],
+          ...liveActivity,
+          detail:
+            liveActivity.detail ?? mergedActivities[existingActivityIndex].detail,
+          output:
+            liveActivity.output ?? mergedActivities[existingActivityIndex].output,
+        };
+      } else {
+        mergedActivities.push(liveActivity);
+      }
+    }
+    mergedActivityByMessageId[messageId] = mergedActivities;
+  }
+
+  return mergedActivityByMessageId;
+}
+
+function normalizeActivityKind(activityKind: string): ActivityEntry["kind"] {
+  if (
+    activityKind === "thinking" ||
+    activityKind === "tool" ||
+    activityKind === "status" ||
+    activityKind === "approval" ||
+    activityKind === "error"
+  ) {
+    return activityKind;
+  }
+
+  return "status";
 }
 
 function filterActivityMessages(

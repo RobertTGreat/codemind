@@ -53,6 +53,23 @@ pub struct GitOperationResult {
     pub stderr: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitFileDiff {
+    pub path: String,
+    pub staged: bool,
+    pub diff_text: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitFileVersion {
+    pub path: String,
+    pub staged: bool,
+    pub original_content: String,
+    pub modified_content: String,
+}
+
 #[derive(Debug, Clone)]
 struct GitCommandOutput {
     success: bool,
@@ -159,6 +176,80 @@ pub fn read_git_repository_status(project_root: String) -> Result<GitRepositoryS
         staged_count,
         unstaged_count,
         untracked_count,
+    })
+}
+
+#[tauri::command]
+pub fn git_file_diff(
+    project_root: String,
+    path: String,
+    staged: bool,
+) -> Result<GitFileDiff, String> {
+    let repository_root = resolve_repository_root(&project_root)?;
+    validate_repository_relative_path(&repository_root, &path)?;
+
+    let args = if staged {
+        vec![
+            "-c".to_string(),
+            "core.quotePath=false".to_string(),
+            "diff".to_string(),
+            "--cached".to_string(),
+            "--".to_string(),
+            path.clone(),
+        ]
+    } else {
+        vec![
+            "-c".to_string(),
+            "core.quotePath=false".to_string(),
+            "diff".to_string(),
+            "--".to_string(),
+            path.clone(),
+        ]
+    };
+
+    let output = run_git_command_with_strings(&repository_root, &args)?;
+
+    if !output.success {
+        return Err(format_git_failure("Git diff failed", &output));
+    }
+
+    Ok(GitFileDiff {
+        path,
+        staged,
+        diff_text: output.stdout,
+    })
+}
+
+#[tauri::command]
+pub fn git_file_version(
+    project_root: String,
+    path: String,
+    staged: bool,
+) -> Result<GitFileVersion, String> {
+    let repository_root = resolve_repository_root(&project_root)?;
+    validate_repository_relative_path(&repository_root, &path)?;
+
+    let repository_status = read_git_repository_status(project_root)?;
+    let changed_file = repository_status
+        .changed_files
+        .iter()
+        .find(|changed_file| changed_file.path == path);
+    let original_path = changed_file
+        .and_then(|changed_file| changed_file.original_path.as_deref())
+        .unwrap_or(path.as_str());
+    let original_content =
+        read_git_blob_text(&repository_root, "HEAD", original_path)?.unwrap_or_default();
+    let modified_content = if staged {
+        read_git_blob_text(&repository_root, "", &path)?.unwrap_or_default()
+    } else {
+        read_worktree_file_text(&repository_root, &path)?
+    };
+
+    Ok(GitFileVersion {
+        path,
+        staged,
+        original_content,
+        modified_content,
     })
 }
 
@@ -400,6 +491,35 @@ fn resolve_repository_root(project_root: &str) -> Result<PathBuf, String> {
     Ok(PathBuf::from(repository_root_output.stdout.trim()))
 }
 
+fn validate_repository_relative_path(repository_root: &Path, path: &str) -> Result<(), String> {
+    let requested_path = Path::new(path);
+
+    if requested_path.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        )
+    }) {
+        return Err("path must stay inside the repository".to_string());
+    }
+
+    let canonical_repository_root =
+        fs::canonicalize(repository_root).map_err(|error| error.to_string())?;
+    let candidate_path = canonical_repository_root.join(requested_path);
+    let canonical_parent = candidate_path
+        .parent()
+        .and_then(|parent| fs::canonicalize(parent).ok())
+        .unwrap_or_else(|| canonical_repository_root.clone());
+
+    if !canonical_parent.starts_with(&canonical_repository_root) {
+        return Err("path escapes the repository".to_string());
+    }
+
+    Ok(())
+}
+
 fn run_git_path_command(
     repository_root: &Path,
     base_args: &[&str],
@@ -458,6 +578,34 @@ fn read_single_line_git_output(repository_root: &Path, args: &[&str]) -> Option<
     } else {
         Some(trimmed_output.to_string())
     }
+}
+
+fn read_git_blob_text(
+    repository_root: &Path,
+    revision: &str,
+    path: &str,
+) -> Result<Option<String>, String> {
+    let object_spec = if revision.is_empty() {
+        format!(":{path}")
+    } else {
+        format!("{revision}:{path}")
+    };
+    let output = run_git_command_with_strings(repository_root, &["show".to_string(), object_spec])?;
+
+    if output.success {
+        Ok(Some(output.stdout))
+    } else {
+        Ok(None)
+    }
+}
+
+fn read_worktree_file_text(repository_root: &Path, path: &str) -> Result<String, String> {
+    let file_path = repository_root.join(path);
+    if !file_path.exists() {
+        return Ok(String::new());
+    }
+
+    fs::read_to_string(&file_path).map_err(|error| format!("file is not valid UTF-8 text: {error}"))
 }
 
 fn read_remote_url(repository_root: &Path, upstream: Option<&str>) -> Option<String> {

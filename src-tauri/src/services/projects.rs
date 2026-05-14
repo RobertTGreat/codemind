@@ -1,4 +1,4 @@
-use crate::models::{FileTreeNode, ProjectFile, ProjectSearchResult};
+use crate::models::{FileTreeNode, ProjectFile, ProjectIndexEntry, ProjectSearchResult};
 use anyhow::{bail, Context, Result};
 use ignore::WalkBuilder;
 use std::fs;
@@ -9,6 +9,7 @@ use uuid::Uuid;
 const MAX_FILE_BYTES: u64 = 512 * 1024;
 const MAX_DIRECTORY_ENTRIES: usize = 2_000;
 const MAX_SEARCH_RESULTS: usize = 80;
+const MAX_PROJECT_INDEX_ENTRIES: usize = 25_000;
 
 pub fn read_project_tree(project_root: String) -> Result<FileTreeNode> {
     let root_path = canonicalize_project_root(&project_root)?;
@@ -60,7 +61,65 @@ pub fn read_project_file(project_root: String, relative_path: String) -> Result<
         absolute_path: file_path.to_string_lossy().to_string(),
         language: detect_language(&file_path),
         content,
+        version: create_file_version(&metadata)?,
     })
+}
+
+pub fn list_project_file_index(project_root: String) -> Result<Vec<ProjectIndexEntry>> {
+    let root_path = canonicalize_project_root(&project_root)?;
+    let mut entries = Vec::new();
+
+    for entry in WalkBuilder::new(&root_path)
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .filter_entry(|entry| should_show_directory_entry(entry.path()))
+        .build()
+        .filter_map(|entry_result| entry_result.ok())
+    {
+        let path = entry.path();
+        if path == root_path {
+            continue;
+        }
+
+        if entries.len() >= MAX_PROJECT_INDEX_ENTRIES {
+            break;
+        }
+
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+
+        let relative_path = path
+            .strip_prefix(&root_path)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        let parent_path = path
+            .parent()
+            .and_then(|parent| parent.strip_prefix(&root_path).ok())
+            .map(|parent| parent.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+
+        entries.push(ProjectIndexEntry {
+            name: name.to_string(),
+            relative_path,
+            parent_path,
+            is_directory: path.is_dir(),
+        });
+    }
+
+    entries.sort_by(|left, right| {
+        right.is_directory.cmp(&left.is_directory).then_with(|| {
+            left.relative_path
+                .to_lowercase()
+                .cmp(&right.relative_path.to_lowercase())
+        })
+    });
+
+    Ok(entries)
 }
 
 pub fn search_project_files(
@@ -126,8 +185,8 @@ pub fn search_project_files(
 }
 
 pub fn resolve_project_path(project_root: &Path, relative_path: &str) -> Result<PathBuf> {
-    let canonical_project_root = fs::canonicalize(project_root)
-        .context("project folder does not exist")?;
+    let canonical_project_root =
+        fs::canonicalize(project_root).context("project folder does not exist")?;
     let requested_relative_path = Path::new(relative_path);
     if requested_relative_path.components().any(|component| {
         matches!(
@@ -149,9 +208,7 @@ pub fn resolve_project_path(project_root: &Path, relative_path: &str) -> Result<
 
     let canonical_parent = candidate_path
         .parent()
-        .map(|parent_path| {
-            canonicalize_existing_ancestor(parent_path, &canonical_project_root)
-        })
+        .map(|parent_path| canonicalize_existing_ancestor(parent_path, &canonical_project_root))
         .transpose()?
         .unwrap_or_else(|| canonical_project_root.clone());
 
@@ -166,9 +223,19 @@ pub fn write_file_atomically(
     project_root: String,
     relative_path: String,
     content: String,
+    expected_version: Option<String>,
 ) -> Result<()> {
     let root_path = canonicalize_project_root(&project_root)?;
     let target_path = resolve_project_path(&root_path, &relative_path)?;
+    if let Some(expected_version) = expected_version {
+        if target_path.exists() {
+            let current_version = create_file_version(&fs::metadata(&target_path)?)?;
+            if current_version != expected_version {
+                bail!("file changed on disk since it was opened; reload or compare before saving");
+            }
+        }
+    }
+
     if let Some(parent_directory) = target_path.parent() {
         fs::create_dir_all(parent_directory)?;
     }
@@ -207,6 +274,16 @@ pub fn write_file_atomically(
 
     write_result?;
     Ok(())
+}
+
+fn create_file_version(metadata: &fs::Metadata) -> Result<String> {
+    let modified = metadata
+        .modified()
+        .context("failed to read file modified time")?
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("file modified time is before Unix epoch")?;
+
+    Ok(format!("{}:{}", metadata.len(), modified.as_nanos()))
 }
 
 pub fn is_not_found_error(error: &anyhow::Error) -> bool {
@@ -357,6 +434,7 @@ mod tests {
             project_root.to_string_lossy().to_string(),
             "note.txt".to_string(),
             "new".to_string(),
+            None,
         )
         .expect("file can be written atomically");
 
@@ -364,14 +442,38 @@ mod tests {
             fs::read_to_string(project_root.join("note.txt")).expect("file can be read"),
             "new"
         );
-        assert!(
-            fs::read_dir(&project_root)
-                .expect("project can be listed")
-                .all(|entry| !entry
-                    .expect("entry can be read")
-                    .file_name()
-                    .to_string_lossy()
-                    .contains("codemind.tmp"))
+        assert!(fs::read_dir(&project_root)
+            .expect("project can be listed")
+            .all(|entry| !entry
+                .expect("entry can be read")
+                .file_name()
+                .to_string_lossy()
+                .contains("codemind.tmp")));
+        let _ = fs::remove_dir_all(project_root);
+    }
+
+    #[test]
+    fn write_file_atomically_rejects_stale_expected_version() {
+        let project_root = create_test_directory("stale-write");
+        let file_path = project_root.join("note.txt");
+        fs::write(&file_path, "old").expect("old file written");
+        let expected_version =
+            create_file_version(&fs::metadata(&file_path).expect("metadata can be read"))
+                .expect("version can be created");
+        fs::write(&file_path, "changed on disk").expect("external write succeeds");
+
+        let error = write_file_atomically(
+            project_root.to_string_lossy().to_string(),
+            "note.txt".to_string(),
+            "new".to_string(),
+            Some(expected_version),
+        )
+        .expect_err("stale version should be rejected");
+
+        assert!(error.to_string().contains("changed on disk"));
+        assert_eq!(
+            fs::read_to_string(file_path).expect("file can be read"),
+            "changed on disk"
         );
         let _ = fs::remove_dir_all(project_root);
     }
@@ -385,8 +487,7 @@ mod tests {
         let outside_root = create_test_directory("symlink-outside");
         let outside_file = outside_root.join("secret.txt");
         fs::write(&outside_file, "secret").expect("outside file written");
-        symlink(&outside_file, project_root.join("linked-secret.txt"))
-            .expect("symlink created");
+        symlink(&outside_file, project_root.join("linked-secret.txt")).expect("symlink created");
 
         let error = resolve_project_path(&project_root, "linked-secret.txt")
             .expect_err("outside symlink should fail");

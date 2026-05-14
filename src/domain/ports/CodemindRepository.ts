@@ -1,12 +1,22 @@
 import type { DiffProposal } from "../models/approval";
 import type { ExtensionInstallResult } from "../models/extension";
-import type { GitOperationResult, GitRepositoryStatus } from "../models/git";
-import type { FileTreeNode, ProjectFile, ProjectSearchResult } from "../models/project";
+import type {
+  GitFileDiff,
+  GitFileVersion,
+  GitOperationResult,
+  GitRepositoryStatus,
+} from "../models/git";
+import type {
+  FileTreeNode,
+  ProjectFile,
+  ProjectIndexEntry,
+  ProjectSearchResult,
+} from "../models/project";
 import type {
   ProviderInstallResult,
   ProviderInstallStatus,
 } from "../models/providerInstall";
-import type { ChatMessage, Session } from "../models/session";
+import type { AgentActivity, ChatMessage, Session } from "../models/session";
 import type {
   ResolvedShellDirectory,
   ShellCommandRun,
@@ -22,6 +32,10 @@ export interface CodemindRepository {
   archiveSession(sessionId: string, isArchived: boolean): Promise<void>;
   deleteSession(sessionId: string): Promise<void>;
   listMessages(sessionId: string): Promise<ChatMessage[]>;
+  listAgentActivities(
+    sessionId: string,
+    messageIds: string[],
+  ): Promise<AgentActivity[]>;
   sendMessage(
     sessionId: string,
     content: string,
@@ -39,11 +53,13 @@ export interface CodemindRepository {
     relativePath: string,
   ): Promise<FileTreeNode[]>;
   readProjectFile(projectRoot: string, relativePath: string): Promise<ProjectFile>;
+  listProjectFileIndex(projectRoot: string): Promise<ProjectIndexEntry[]>;
   searchProjectFiles(projectRoot: string, query: string): Promise<ProjectSearchResult[]>;
   saveProjectFile(
     projectRoot: string,
     relativePath: string,
     content: string,
+    expectedVersion?: string,
   ): Promise<ProjectFile>;
   createDiffProposal(
     sessionId: string,
@@ -77,6 +93,16 @@ export interface CodemindRepository {
     downloadUrl: string,
   ): Promise<ExtensionInstallResult>;
   readGitRepositoryStatus(projectRoot: string): Promise<GitRepositoryStatus>;
+  gitFileDiff(
+    projectRoot: string,
+    path: string,
+    staged: boolean,
+  ): Promise<GitFileDiff>;
+  gitFileVersion(
+    projectRoot: string,
+    path: string,
+    staged: boolean,
+  ): Promise<GitFileVersion>;
   gitInitRepository(projectRoot: string): Promise<GitOperationResult>;
   gitSetRemote(projectRoot: string, remoteUrl: string): Promise<GitOperationResult>;
   gitStagePaths(projectRoot: string, paths: string[]): Promise<GitOperationResult>;

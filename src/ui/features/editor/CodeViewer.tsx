@@ -1,12 +1,16 @@
 import Editor, { DiffEditor, type BeforeMount, type OnMount } from "@monaco-editor/react";
 import { useQueryClient } from "@tanstack/react-query";
-import { FileCode, Save, X } from "lucide-react";
+import { FileCode, GitCompare, Save, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { DiffProposal } from "../../../domain/models/approval";
 import type { FileChangeSummary } from "../../../domain/logic/diffAnnotations";
+import type { GitChangedFile } from "../../../domain/models/git";
+import type { ProjectFile } from "../../../domain/models/project";
 import { createLineChangeAnnotations } from "../../../domain/logic/diffAnnotations";
 import {
   codemindQueryKeys,
+  useGitFileVersion,
+  useGitStatus,
   useProjectFile,
   useSaveProjectFile,
 } from "../../../application/use-cases/sessionQueries";
@@ -43,13 +47,17 @@ export function CodeViewer({
 }: CodeViewerProps) {
   const [draftContentByPath, setDraftContentByPath] = useState<Record<string, string>>({});
   const [savedContentByPath, setSavedContentByPath] = useState<Record<string, string>>({});
+  const [isGitDiffMode, setIsGitDiffMode] = useState(false);
+  const [gitDiffSource, setGitDiffSource] = useState<"working" | "staged">("working");
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
   const monacoRef = useRef<Parameters<OnMount>[1] | null>(null);
   const decorationIdsRef = useRef<string[]>([]);
   const savedContentByPathRef = useRef<Record<string, string>>({});
+  const highlightingRequestRef = useRef(0);
   const queryClient = useQueryClient();
   const projectFile = useProjectFile(projectRoot, selectedFilePath);
   const saveProjectFile = useSaveProjectFile(projectRoot, selectedFilePath);
+  const gitStatus = useGitStatus(projectRoot);
   const openFileTabs = useWorkspaceStore((store) => store.openFileTabs);
   const closeFileTab = useWorkspaceStore((store) => store.closeFileTab);
   const language = getEditorLanguageId(selectedFilePath, projectFile.data?.language);
@@ -57,6 +65,10 @@ export function CodeViewer({
     ? fileChangeSummaryByPath[selectedFilePath]
     : undefined;
   const editorDiffProposal = selectedDiff ?? selectedFileChangeSummary?.proposal ?? null;
+  const selectedGitChangedFile = useMemo(
+    () => findGitChangedFile(gitStatus.data?.changedFiles ?? [], selectedFilePath),
+    [gitStatus.data?.changedFiles, selectedFilePath],
+  );
   const draftContent =
     selectedFilePath
       ? draftContentByPath[selectedFilePath] ?? projectFile.data?.content ?? ""
@@ -68,10 +80,36 @@ export function CodeViewer({
   );
   const hasUnsavedEditorChanges =
     Boolean(selectedFilePath) && isFileDirty(selectedFilePath);
+  const hasSelectedWorkingTreeChanges =
+    Boolean(selectedGitChangedFile?.isUnstaged || selectedGitChangedFile?.isUntracked);
+  const hasSelectedStagedChanges = Boolean(selectedGitChangedFile?.isStaged);
+  const canShowGitDiff =
+    Boolean(selectedFilePath && selectedGitChangedFile) && !selectedDiff;
+  const isViewingStagedGitDiff =
+    gitDiffSource === "staged" && hasSelectedStagedChanges;
+  const gitFileVersion = useGitFileVersion(
+    projectRoot,
+    selectedFilePath,
+    isViewingStagedGitDiff,
+    isGitDiffMode && canShowGitDiff,
+  );
 
   useEffect(() => {
     savedContentByPathRef.current = savedContentByPath;
   }, [savedContentByPath]);
+
+  useEffect(() => {
+    setIsGitDiffMode(false);
+    setGitDiffSource(
+      selectedGitChangedFile?.isStaged && !selectedGitChangedFile.isUnstaged
+        ? "staged"
+        : "working",
+    );
+  }, [
+    selectedFilePath,
+    selectedGitChangedFile?.isStaged,
+    selectedGitChangedFile?.isUnstaged,
+  ]);
 
   useEffect(() => {
     if (!selectedFilePath || !projectFile.data) {
@@ -107,14 +145,25 @@ export function CodeViewer({
 
   useEffect(() => {
     const editorModel = editorRef.current?.getModel();
-    if (!editorModel || !monacoRef.current) {
+    const monaco = monacoRef.current;
+
+    if (!editorModel || !monaco) {
       return;
     }
 
-    monacoRef.current.editor.setModelLanguage(editorModel, language);
-    registerEditorLanguage(monacoRef.current, language);
-    void applyTextMateHighlighting(monacoRef.current, language, draftContent);
-  }, [draftContent, language, selectedFilePath]);
+    const requestId = ++highlightingRequestRef.current;
+    const loadedFileSize = projectFile.data?.content.length ?? 0;
+
+    registerEditorLanguage(monaco, language);
+    monaco.editor.setModelLanguage(editorModel, language);
+
+    void applyTextMateHighlightingOnce({
+      monaco,
+      language,
+      fileSizeBytes: loadedFileSize,
+      isCurrentRequest: () => highlightingRequestRef.current === requestId,
+    });
+  }, [language, projectFile.data?.absolutePath, projectFile.data?.content.length]);
 
   useEffect(() => {
     if (!editorRef.current || !monacoRef.current || selectedDiff) {
@@ -154,10 +203,18 @@ export function CodeViewer({
 
     const editorModel = editor.getModel();
     if (editorModel) {
+      const requestId = ++highlightingRequestRef.current;
+      const loadedFileSize = projectFile.data?.content.length ?? draftContent.length;
+
       registerEditorLanguage(monaco, language);
       monaco.editor.setModelLanguage(editorModel, language);
+      void applyTextMateHighlightingOnce({
+        monaco,
+        language,
+        fileSizeBytes: loadedFileSize,
+        isCurrentRequest: () => highlightingRequestRef.current === requestId,
+      });
     }
-    void applyTextMateHighlighting(monaco, language, draftContent);
   };
 
   const configureEditorLanguageDefaults: BeforeMount = (monaco) => {
@@ -197,14 +254,22 @@ export function CodeViewer({
       return;
     }
 
-    const projectFile = await saveProjectFile.mutateAsync(draftContent);
+    const expectedVersion = projectFile.data?.version;
+    const savedFile = await saveProjectFile.mutateAsync({
+      content: draftContent,
+      expectedVersion,
+    });
+    queryClient.setQueryData(
+      codemindQueryKeys.file(projectRoot, selectedFilePath),
+      savedFile,
+    );
     setSavedContentByPath((currentSavedContentByPath) => ({
       ...currentSavedContentByPath,
-      [selectedFilePath]: projectFile.content,
+      [selectedFilePath]: savedFile.content,
     }));
     setDraftContentByPath((currentDraftContentByPath) => ({
       ...currentDraftContentByPath,
-      [selectedFilePath]: projectFile.content,
+      [selectedFilePath]: savedFile.content,
     }));
   }
 
@@ -213,31 +278,62 @@ export function CodeViewer({
       return;
     }
 
-    for (const dirtyFilePath of dirtyFilePaths) {
-      const nextContent = draftContentByPath[dirtyFilePath];
-      if (nextContent === undefined) {
-        continue;
-      }
-      const projectFile = await tauriCodemindRepository.saveProjectFile(
+    const dirtySnapshots = dirtyFilePaths
+      .map((relativePath) => {
+        const cachedProjectFile = queryClient.getQueryData<ProjectFile>(
+          codemindQueryKeys.file(projectRoot, relativePath),
+        );
+
+        return {
+          relativePath,
+          content: draftContentByPath[relativePath],
+          expectedVersion: cachedProjectFile?.version,
+        };
+      })
+      .filter(
+        (snapshot): snapshot is {
+          relativePath: string;
+          content: string;
+          expectedVersion: string | undefined;
+        } => snapshot.content !== undefined,
+      );
+
+    const savedFiles = await mapWithConcurrency(dirtySnapshots, 4, (snapshot) =>
+      tauriCodemindRepository.saveProjectFile(
         projectRoot,
-        dirtyFilePath,
-        nextContent,
-      );
+        snapshot.relativePath,
+        snapshot.content,
+        snapshot.expectedVersion,
+      ),
+    );
+
+    const savedContentPatch: Record<string, string> = Object.fromEntries(
+      savedFiles.map((savedFile) => [savedFile.relativePath, savedFile.content]),
+    );
+
+    for (const savedFile of savedFiles) {
       queryClient.setQueryData(
-        codemindQueryKeys.file(projectRoot, dirtyFilePath),
-        projectFile,
+        codemindQueryKeys.file(projectRoot, savedFile.relativePath),
+        savedFile,
       );
-      setSavedContentByPath((currentSavedContentByPath) => ({
-        ...currentSavedContentByPath,
-        [dirtyFilePath]: projectFile.content,
-      }));
-      setDraftContentByPath((currentDraftContentByPath) => ({
-        ...currentDraftContentByPath,
-        [dirtyFilePath]: projectFile.content,
-      }));
     }
 
+    setSavedContentByPath((currentSavedContentByPath) => ({
+      ...currentSavedContentByPath,
+      ...savedContentPatch,
+    }));
+
+    setDraftContentByPath((currentDraftContentByPath) => ({
+      ...currentDraftContentByPath,
+      ...savedContentPatch,
+    }));
+
     queryClient.invalidateQueries({ queryKey: codemindQueryKeys.projectTree(projectRoot) });
+    queryClient.invalidateQueries({ queryKey: codemindQueryKeys.projectFileIndex(projectRoot) });
+    queryClient.invalidateQueries({
+      queryKey: ["project-directory", projectRoot],
+      exact: false,
+    });
     queryClient.invalidateQueries({ queryKey: codemindQueryKeys.gitStatus(projectRoot) });
   }
 
@@ -314,6 +410,46 @@ export function CodeViewer({
         ))}
         </div>
         <div className="flex items-center gap-2">
+          {canShowGitDiff ? (
+            <>
+              <Badge>{selectedGitChangedFile?.changeType ?? "Git change"}</Badge>
+              {isGitDiffMode && hasSelectedWorkingTreeChanges && hasSelectedStagedChanges ? (
+                <div className="flex rounded border border-zinc-800 bg-zinc-950 p-0.5">
+                  <button
+                    type="button"
+                    className={cn(
+                      "rounded px-2 py-1 text-[11px]",
+                      gitDiffSource === "working"
+                        ? "bg-zinc-800 text-zinc-100"
+                        : "text-zinc-500 hover:text-zinc-200",
+                    )}
+                    onClick={() => setGitDiffSource("working")}
+                  >
+                    Working
+                  </button>
+                  <button
+                    type="button"
+                    className={cn(
+                      "rounded px-2 py-1 text-[11px]",
+                      gitDiffSource === "staged"
+                        ? "bg-zinc-800 text-zinc-100"
+                        : "text-zinc-500 hover:text-zinc-200",
+                    )}
+                    onClick={() => setGitDiffSource("staged")}
+                  >
+                    Staged
+                  </button>
+                </div>
+              ) : null}
+              <Button
+                className="h-8 w-8 px-0"
+                variant={isGitDiffMode ? "primary" : "secondary"}
+                icon={<GitCompare size={14} />}
+                onClick={() => setIsGitDiffMode((isEnabled) => !isEnabled)}
+                title={isGitDiffMode ? "Show editor" : "Show Git diff"}
+              />
+            </>
+          ) : null}
           {editorDiffProposal ? (
             <Badge>
               {editorDiffProposal.originalContent.length === 0 ? "New file" : "Pending diff"}
@@ -355,6 +491,30 @@ export function CodeViewer({
             beforeMount={configureEditorLanguageDefaults}
             options={{ readOnly: true, renderSideBySide: true }}
           />
+        ) : isGitDiffMode && canShowGitDiff && selectedFilePath ? (
+          gitFileVersion.isLoading ? (
+            <div className="p-4 text-sm text-zinc-500">Loading Git diff...</div>
+          ) : gitFileVersion.error ? (
+            <div className="p-4 text-sm text-red-200">
+              {gitFileVersion.error instanceof Error
+                ? gitFileVersion.error.message
+                : String(gitFileVersion.error)}
+            </div>
+          ) : (
+            <DiffEditor
+              height="100%"
+              language={language}
+              original={gitFileVersion.data?.originalContent ?? ""}
+              modified={
+                isViewingStagedGitDiff
+                  ? (gitFileVersion.data?.modifiedContent ?? "")
+                  : draftContent
+              }
+              theme="vs-dark"
+              beforeMount={configureEditorLanguageDefaults}
+              options={{ readOnly: true, renderSideBySide: true }}
+            />
+          )
         ) : selectedFilePath ? (
           <Editor
             height="100%"
@@ -407,13 +567,39 @@ function getFileName(filePath: string): string {
   return pathParts[pathParts.length - 1] ?? filePath;
 }
 
-async function applyTextMateHighlighting(
-  monaco: Parameters<BeforeMount>[0],
+function findGitChangedFile(
+  changedFiles: GitChangedFile[],
+  selectedFilePath: string | null,
+): GitChangedFile | undefined {
+  if (!selectedFilePath) {
+    return undefined;
+  }
+
+  const normalizedSelectedPath = selectedFilePath.replace(/\\/g, "/");
+  return changedFiles.find((changedFile) => {
+    const normalizedChangedPath = changedFile.path.replace(/\\/g, "/");
+    return (
+      normalizedChangedPath === normalizedSelectedPath ||
+      normalizedChangedPath.endsWith(`/${normalizedSelectedPath}`)
+    );
+  });
+}
+
+async function applyTextMateHighlightingOnce({
+  monaco,
+  language,
+  fileSizeBytes,
+  isCurrentRequest,
+}: {
+  monaco: Parameters<BeforeMount>[0];
   language: string,
-  content: string,
-) {
-  if (language === "plaintext" || content.length > MAX_TEXTMATE_FILE_BYTES) {
-    monaco.editor.setTheme("vs-dark");
+  fileSizeBytes: number;
+  isCurrentRequest: () => boolean;
+}) {
+  if (language === "plaintext" || fileSizeBytes > MAX_TEXTMATE_FILE_BYTES) {
+    if (isCurrentRequest()) {
+      monaco.editor.setTheme("vs-dark");
+    }
     return;
   }
 
@@ -423,12 +609,45 @@ async function applyTextMateHighlighting(
       ensureTextMateLanguage,
       getTextMateThemeName,
     } = await import("./textmateHighlighting");
+
+    if (!isCurrentRequest()) {
+      return;
+    }
+
     configureTextMateHighlighting(monaco);
     await ensureTextMateLanguage(monaco, language);
-    monaco.editor.setTheme(getTextMateThemeName());
+
+    if (isCurrentRequest()) {
+      monaco.editor.setTheme(getTextMateThemeName());
+    }
   } catch {
-    monaco.editor.setTheme("vs-dark");
+    if (isCurrentRequest()) {
+      monaco.editor.setTheme("vs-dark");
+    }
   }
+}
+
+async function mapWithConcurrency<TInput, TOutput>(
+  inputs: TInput[],
+  concurrency: number,
+  mapper: (input: TInput) => Promise<TOutput>,
+): Promise<TOutput[]> {
+  const results: TOutput[] = [];
+  let nextIndex = 0;
+
+  async function worker() {
+    while (nextIndex < inputs.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await mapper(inputs[currentIndex]);
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, inputs.length) }, () => worker()),
+  );
+
+  return results;
 }
 
 function getTabChangeClasses(changeSummary: FileChangeSummary | undefined): string {

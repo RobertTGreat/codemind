@@ -1,17 +1,23 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { CodemindRepository } from "../../domain/ports/CodemindRepository";
 import type { DiffProposal } from "../../domain/models/approval";
-import type { GitOperationResult, GitRepositoryStatus } from "../../domain/models/git";
+import type {
+  GitFileDiff,
+  GitFileVersion,
+  GitOperationResult,
+  GitRepositoryStatus,
+} from "../../domain/models/git";
 import type {
   FileTreeNode,
   ProjectFile,
+  ProjectIndexEntry,
   ProjectSearchResult,
 } from "../../domain/models/project";
 import type {
   ProviderInstallResult,
   ProviderInstallStatus,
 } from "../../domain/models/providerInstall";
-import type { ChatMessage, Session } from "../../domain/models/session";
+import type { AgentActivity, ChatMessage, Session } from "../../domain/models/session";
 import type {
   ResolvedShellDirectory,
   ShellCommandRun,
@@ -32,6 +38,8 @@ export const tauriCodemindRepository: CodemindRepository = {
   deleteSession: (sessionId) => invoke<void>("delete_session", { sessionId }),
   listMessages: (sessionId) =>
     invoke<ChatMessage[]>("list_messages", { sessionId }),
+  listAgentActivities: (sessionId, messageIds) =>
+    invoke<AgentActivity[]>("list_agent_activities", { sessionId, messageIds }),
   sendMessage: (
     sessionId,
     content,
@@ -60,10 +68,17 @@ export const tauriCodemindRepository: CodemindRepository = {
     invoke<FileTreeNode[]>("read_project_directory", { projectRoot, relativePath }),
   readProjectFile: (projectRoot, relativePath) =>
     invoke<ProjectFile>("read_project_file", { projectRoot, relativePath }),
+  listProjectFileIndex: (projectRoot) =>
+    invoke<ProjectIndexEntry[]>("list_project_file_index", { projectRoot }),
   searchProjectFiles: (projectRoot, query) =>
     invoke<ProjectSearchResult[]>("search_project_files", { projectRoot, query }),
-  saveProjectFile: (projectRoot, relativePath, content) =>
-    invoke<ProjectFile>("save_project_file", { projectRoot, relativePath, content }),
+  saveProjectFile: (projectRoot, relativePath, content, expectedVersion) =>
+    invoke<ProjectFile>("save_project_file", {
+      projectRoot,
+      relativePath,
+      content,
+      expectedVersion,
+    }),
   createDiffProposal: (sessionId, relativePath, proposedContent) =>
     invoke<DiffProposal>("create_diff_proposal", {
       sessionId,
@@ -104,6 +119,10 @@ export const tauriCodemindRepository: CodemindRepository = {
     invoke("install_open_vsx_extension", { extensionId, downloadUrl }),
   readGitRepositoryStatus: (projectRoot) =>
     invoke<GitRepositoryStatus>("read_git_repository_status", { projectRoot }),
+  gitFileDiff: (projectRoot, path, staged) =>
+    invoke<GitFileDiff>("git_file_diff", { projectRoot, path, staged }),
+  gitFileVersion: (projectRoot, path, staged) =>
+    invoke<GitFileVersion>("git_file_version", { projectRoot, path, staged }),
   gitInitRepository: (projectRoot) =>
     invoke<GitOperationResult>("git_init_repository", { projectRoot }),
   gitSetRemote: (projectRoot, remoteUrl) =>
